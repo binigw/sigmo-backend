@@ -264,6 +264,62 @@ async def run() -> None:
         f"res={res8}",
     )
 
+    # ---- AI9: gemini thinking-model payload extraction ---------------
+    from backend.ai.client import _extract_gemini_text as extract
+
+    ok_payload = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {"text": "internal reasoning", "thought": True},
+                        {
+                            "text": '{"analysis_am": "\u12a0", '
+                            '"analysis_en": "e"}'
+                        },
+                    ]
+                },
+                "finishReason": "STOP",
+            }
+        ]
+    }
+    no_text = {
+        "candidates": [
+            {
+                "content": {"parts": [{"text": "x", "thought": True}]},
+                "finishReason": "STOP",
+            }
+        ]
+    }
+    capped = {
+        "candidates": [
+            {
+                "content": {"parts": [{"text": "partial json..."}]},
+                "finishReason": "MAX_TOKENS",
+            }
+        ]
+    }
+    try:
+        extract(no_text)
+        empty_refused = False
+    except Exception:
+        empty_refused = True
+    try:
+        extract(capped)
+        cap_refused = False
+    except Exception:
+        cap_refused = True
+    check(
+        "AI9 gemini extraction (thought parts skipped, empty/capped "
+        "refused)",
+        extract(ok_payload)
+        == '{"analysis_am": "\u12a0", "analysis_en": "e"}'
+        and empty_refused
+        and cap_refused,
+        f"joined_ok, empty_refused={empty_refused}, "
+        f"cap_refused={cap_refused}",
+    )
+
     print()
     if failures:
         print(f"RESULT: {len(failures)} FAILURE(S): {failures}")

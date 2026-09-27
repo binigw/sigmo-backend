@@ -19,6 +19,7 @@ a hard timeout; every provider failure surfaces as AIExplanationError.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -31,7 +32,13 @@ import httpx
 logger = logging.getLogger("sigmo.ai")
 
 DEFAULT_TIMEOUT_S = 90.0
-DEFAULT_MAX_OUTPUT_TOKENS = 2048
+# Thinking models (Gemini 3.x) count reasoning tokens toward the output
+# cap: 2048 truncated real analyses in production (thoughts 759 +
+# answer 1831 tokens for one motor). 8192 is a cap, not a target.
+DEFAULT_MAX_OUTPUT_TOKENS = 8192
+# Transient provider capacity errors worth one automatic retry.
+RETRYABLE_STATUSES = frozenset({429, 503})
+RETRY_DELAYS_S = (3.0, 8.0)
 
 PROVIDER_ENV: dict[str, tuple[str, str, str]] = {
     # provider -> (api key env var, model env var, default model)
@@ -202,32 +209,75 @@ async def _call_openai_compatible(
             {"role": "user", "content": context_json},
         ],
     }
-    try:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_S) as client:
-            response = await client.post(
-                f"{base}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json=body,
-            )
-        if response.status_code != 200:
+    for attempt in range(len(RETRY_DELAYS_S) + 1):
+        try:
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_S) as client:
+                response = await client.post(
+                    f"{base}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json=body,
+                )
+        except httpx.HTTPError as exc:
             raise AIExplanationError(
-                f"{provider} API returned HTTP {response.status_code}: "
-                f"{response.text[:300]}"
+                f"{provider} request failed: {exc}"
+            ) from exc
+        if response.status_code == 200:
+            try:
+                return str(
+                    response.json()["choices"][0]["message"]["content"]
+                )
+            except (KeyError, IndexError, ValueError) as exc:
+                raise AIExplanationError(
+                    f"{provider} response was missing choices/message "
+                    f"content"
+                ) from exc
+        if (
+            response.status_code in RETRYABLE_STATUSES
+            and attempt < len(RETRY_DELAYS_S)
+        ):
+            logger.warning(
+                "%s HTTP %s (attempt %d) - retrying in %.0fs",
+                provider, response.status_code, attempt + 1,
+                RETRY_DELAYS_S[attempt],
             )
-        payload = response.json()
-        return str(payload["choices"][0]["message"]["content"])
-    except httpx.HTTPError as exc:
-        raise AIExplanationError(f"{provider} request failed: {exc}") from exc
-    except (KeyError, IndexError, ValueError) as exc:
+            await asyncio.sleep(RETRY_DELAYS_S[attempt])
+            continue
         raise AIExplanationError(
-            f"{provider} response was missing choices/message content"
-        ) from exc
+            f"{provider} API returned HTTP {response.status_code}: "
+            f"{response.text[:300]}"
+        )
+    raise AIExplanationError(f"{provider} retries exhausted")
+
+
+def _extract_gemini_text(payload: dict[str, Any]) -> str:
+    """Join the answer parts of a Gemini response, skipping thought
+    parts (thinking models may emit them). Honest errors when the
+    answer is missing or hit the output-token cap."""
+    candidates = payload.get("candidates") or []
+    if not candidates:
+        raise AIExplanationError("gemini response was missing candidates")
+    candidate = candidates[0] or {}
+    parts = (candidate.get("content") or {}).get("parts") or []
+    text = "".join(
+        str(part.get("text", ""))
+        for part in parts
+        if isinstance(part, dict) and not part.get("thought")
+    ).strip()
+    if not text:
+        raise AIExplanationError("gemini response contained no answer text")
+    if candidate.get("finishReason") == "MAX_TOKENS":
+        raise AIExplanationError(
+            "gemini answer hit the output-token cap "
+            "(finishReason=MAX_TOKENS); the motor context may be too "
+            "large for the configured model"
+        )
+    return text
 
 
 async def _call_gemini(
     api_key: str, model: str, context_json: str
 ) -> str:
-    """Google Gemini generateContent."""
+    """Google Gemini generateContent (retries transient 429/503)."""
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model}:generateContent"
@@ -241,26 +291,33 @@ async def _call_gemini(
             "responseMimeType": "application/json",
         },
     }
-    try:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_S) as client:
-            response = await client.post(
-                url, headers={"x-goog-api-key": api_key}, json=body
-            )
-        if response.status_code != 200:
+    for attempt in range(len(RETRY_DELAYS_S) + 1):
+        try:
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_S) as client:
+                response = await client.post(
+                    url, headers={"x-goog-api-key": api_key}, json=body
+                )
+        except httpx.HTTPError as exc:
             raise AIExplanationError(
-                f"gemini API returned HTTP {response.status_code}: "
-                f"{response.text[:300]}"
+                f"gemini request failed: {exc}"
+            ) from exc
+        if response.status_code == 200:
+            return _extract_gemini_text(response.json())
+        if (
+            response.status_code in RETRYABLE_STATUSES
+            and attempt < len(RETRY_DELAYS_S)
+        ):
+            logger.warning(
+                "gemini HTTP %s (attempt %d) - retrying in %.0fs",
+                response.status_code, attempt + 1, RETRY_DELAYS_S[attempt],
             )
-        payload = response.json()
-        return str(
-            payload["candidates"][0]["content"]["parts"][0]["text"]
-        )
-    except httpx.HTTPError as exc:
-        raise AIExplanationError(f"gemini request failed: {exc}") from exc
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
+            await asyncio.sleep(RETRY_DELAYS_S[attempt])
+            continue
         raise AIExplanationError(
-            "gemini response was missing candidates/content"
-        ) from exc
+            f"gemini API returned HTTP {response.status_code}: "
+            f"{response.text[:300]}"
+        )
+    raise AIExplanationError("gemini retries exhausted")
 
 
 def _prompt_default(obj: Any) -> Any:
