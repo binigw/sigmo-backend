@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -262,6 +263,19 @@ async def _call_gemini(
         ) from exc
 
 
+def _prompt_default(obj: Any) -> Any:
+    """json.dumps default for the LLM prompt: database Decimals and
+    numpy scalars become plain JSON numbers; anything exotic degrades
+    to a string. The prompt must never fail on real DB data (production
+    incident: a nameplate Decimal crashed json.dumps -> raw 500)."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    try:
+        return float(obj)  # numpy float32/float64 and similar
+    except (TypeError, ValueError):
+        return str(obj)
+
+
 async def generate_explanation(context: dict[str, Any]) -> dict[str, str]:
     """Run the configured provider on the motor context.
 
@@ -269,18 +283,27 @@ async def generate_explanation(context: dict[str, Any]) -> dict[str, str]:
     Raises AIProviderNotConfigured / AIExplanationError.
     """
     provider, api_key, model = resolve_provider()
-    context_json = json.dumps(context, ensure_ascii=False, indent=1)
-    logger.info(
-        "AI explanation request provider=%s model=%s context_bytes=%d",
-        provider, model, len(context_json),
-    )
-    if provider == "gemini":
-        raw = await _call_gemini(api_key, model, context_json)
-    else:
-        raw = await _call_openai_compatible(
-            provider, api_key, model, context_json
+    try:
+        context_json = json.dumps(
+            context, ensure_ascii=False, indent=1, default=_prompt_default
         )
-    result = _parse_analysis(raw)
+        logger.info(
+            "AI explanation request provider=%s model=%s context_bytes=%d",
+            provider, model, len(context_json),
+        )
+        if provider == "gemini":
+            raw = await _call_gemini(api_key, model, context_json)
+        else:
+            raw = await _call_openai_compatible(
+                provider, api_key, model, context_json
+            )
+        result = _parse_analysis(raw)
+    except (AIProviderNotConfigured, AIExplanationError):
+        raise
+    except Exception as exc:  # never leak an opaque 500 to the dashboard
+        raise AIExplanationError(
+            f"AI explanation pipeline failed unexpectedly: {exc}"
+        ) from exc
     logger.info(
         "AI explanation ok provider=%s model=%s am_chars=%d en_chars=%d",
         provider, model,

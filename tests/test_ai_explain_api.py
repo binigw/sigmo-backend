@@ -229,6 +229,41 @@ async def run() -> None:
         f"provider={provider3}, key={key3!r}, model={model3}",
     )
 
+    # ---- AI8: real-DB Decimal values survive prompt serialization ----
+    import decimal
+    import json as _json
+
+    os.environ["GEMINI_API_KEY"] = "AIza-clean"
+
+    async def fake_gemini(api_key, model, context_json):
+        _json.loads(context_json)  # prompt MUST be valid JSON text
+        return '{"analysis_am": "\u12a0", "analysis_en": "e"}'
+
+    original_call = ai_client_module._call_gemini
+    ai_client_module._call_gemini = fake_gemini
+    try:
+        res8 = await ai_client_module.generate_explanation(
+            {
+                "motor": {
+                    "nameplate_kw": decimal.Decimal("75.0"),
+                    "rated_rpm": decimal.Decimal("2970"),
+                },
+                "current_window": {
+                    "thd_percent_max": decimal.Decimal("6.9")
+                },
+            }
+        )
+    finally:
+        ai_client_module._call_gemini = original_call
+        os.environ.pop("GEMINI_API_KEY", None)
+    check(
+        "AI8 DB Decimal values serialize into the LLM prompt",
+        res8.get("provider") == "gemini"
+        and res8.get("analysis_am") == "\u12a0"
+        and res8.get("analysis_en") == "e",
+        f"res={res8}",
+    )
+
     print()
     if failures:
         print(f"RESULT: {len(failures)} FAILURE(S): {failures}")
