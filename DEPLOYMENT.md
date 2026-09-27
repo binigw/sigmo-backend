@@ -130,3 +130,24 @@ RUL አይሰላም፣ asset registry አይሰራም (degraded mode)።
 | `github.com/binigw/sigmo-backend` | የሙሉ codebase (Render ከዚህ ይገነባል) |
 | `huggingface.co/Bini-K/Sigmo-backend` | Model artifacts (tag-pinned `v6.20260925.045900`) |
 | ይህ workspace (`sigmo_v2/`) | Source of truth — tests, corpora, trainer |
+
+## AI Technician Analysis (optional env vars)
+
+`POST /api/v2/ai/explain` feeds the real V2 telemetry evidence (health
+index, THD, unbalance, crest factor, rotor sidebands, per-phase RMS,
+the v6c verdict + probabilities, stage, RUL and the system's own
+Amharic repair protocol) to a real LLM, which answers as an expert
+motor technician in Amharic AND English. The route returns an honest
+503 until one provider key is configured:
+
+| Variable | Meaning |
+|---|---|
+| `OPENAI_API_KEY` | Use OpenAI (default model `gpt-4o-mini`) |
+| `DEEPSEEK_API_KEY` | Use DeepSeek (default model `deepseek-chat`) |
+| `GEMINI_API_KEY` | Use Google Gemini (default model `gemini-2.0-flash`) |
+| `AI_PROVIDER` | Optional: force `openai`, `deepseek` or `gemini` |
+| `OPENAI_MODEL` / `DEEPSEEK_MODEL` / `GEMINI_MODEL` | Optional model override |
+
+Priority: explicit `AI_PROVIDER`, then the first key found
+(openai -> deepseek -> gemini). No key = honest 503, never a fabricated
+answer. Scope: dashboard/admin keys only.

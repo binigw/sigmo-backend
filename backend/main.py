@@ -55,6 +55,7 @@ buffers feature rows in RAM, then flushes when the database returns.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -77,7 +78,14 @@ from .api.schemas import (
     MotorsOverviewPayload,
     TrendsPayload,
     FaultLogsPayload,
+    AIExplainRequest,
+    AIExplainResponse,
 )
+from .ai import client as ai_client
+from .ai.client import AIExplanationError, AIProviderNotConfigured
+from .analysis.repair_protocols_am import AMHARIC_PROTOCOLS
+from .analysis.staging import motor_health_percent
+from .ai.client import AIExplanationError, AIProviderNotConfigured
 from .config import API
 from .db.repository import SigmoRepository
 
@@ -278,6 +286,139 @@ async def faults(
         raise HTTPException(
             status_code=500, detail=f"Fault logs error: {exc}"
         ) from exc
+
+
+@app.post("/api/v2/ai/explain", response_model=AIExplainResponse)
+async def ai_explain(request: AIExplainRequest) -> AIExplainResponse:
+    """Real-LLM technician analysis of one motor (Amharic + English).
+
+    Feeds the ACTUAL V2 evidence to the configured LLM provider
+    (OPENAI_API_KEY / DEEPSEEK_API_KEY / GEMINI_API_KEY — never a graph
+    image, never invented numbers): latest steady-state window, recent
+    window history, the ACTIVE v6c verdict with probabilities and
+    temporal aggregation, the deterministic stage and Section 14 RUL,
+    the registered nameplate specs and the system's own Amharic repair
+    protocol as grounding. The model must answer as an expert
+    industrial motor technician: root cause tied to the measured
+    values, then step-by-step actions, in Amharic AND English.
+    """
+    import time as _time
+
+    motor_id = request.motor_id
+    try:
+        assessment = await service.assessment(motor_id)
+        history = await service.telemetry_history(
+            motor_id, hours=168, limit=8
+        )
+    except ValueError as exc:
+        if "No telemetry recorded" in str(exc):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise
+    except Exception as exc:
+        logger.exception("AI explain context failure for motor %s", motor_id)
+        raise HTTPException(
+            status_code=500, detail=f"AI explain context error: {exc}"
+        ) from exc
+
+    asset: dict | None = None
+    try:
+        asset = await repository.get_motor_asset(motor_id)
+    except Exception:
+        asset = None  # nameplate specs are enrichment, never blocking
+
+    fa = assessment.fault_assessment
+    snap = assessment.snapshot
+    predicted = fa.dominant_fault if fa is not None else None
+    context: dict[str, object] = {
+        "motor": {
+            "motor_id": motor_id,
+            "nameplate_kw": asset.get("nameplate_kw") if asset else None,
+            "rated_rpm": asset.get("rated_rpm") if asset else None,
+            "drive_type": asset.get("drive_type") if asset else None,
+            "mcc_panel_id": asset.get("mcc_panel_id") if asset else None,
+        },
+        "current_window": {
+            **(
+                {
+                    "recorded_at": snap.recorded_at.isoformat(),
+                    "gate_status": snap.status,
+                    "fundamental_hz": snap.fundamental_hz,
+                    "rms_a": snap.rms_a,
+                    "rms_b": snap.rms_b,
+                    "rms_c": snap.rms_c,
+                    "thd_percent_max": snap.thd_percent_max,
+                    "current_unbalance_percent": (
+                        snap.current_unbalance_percent
+                    ),
+                    "crest_factor_max": snap.crest_factor_max,
+                    "rotor_sideband_db_max": snap.rotor_sideband_db_max,
+                    "zscore_max_sigma": snap.zscore_max,
+                    "health_percent": motor_health_percent(snap.zscore_max),
+                }
+                if snap is not None
+                else {}
+            ),
+            "verdict_13class": predicted,
+            "verdict_confidence": fa.confidence if fa else None,
+            "verdict_probabilities_top5": (
+                dict(
+                    sorted(fa.probabilities.items(), key=lambda kv: -kv[1])[:5]
+                )
+                if fa
+                else {}
+            ),
+            "temporal_aggregation": fa.temporal_aggregation if fa else None,
+        },
+        "rul": {
+            "rul_days_estimate": assessment.rul.rul_days_estimate
+            if assessment.rul
+            else None,
+            "rul_status": assessment.rul.rul_status if assessment.rul else None,
+        },
+        "recent_windows": [
+            {
+                "recorded_at": p.recorded_at.isoformat(),
+                "gate_status": p.status,
+                "verdict_13class": p.predicted_class,
+                "health_percent": p.health_percent,
+                "thd_percent_max": p.thd_percent_max,
+                "current_unbalance_percent": p.unbalance_percent,
+                "crest_factor_max": p.crest_factor_max,
+                "rotor_sideband_db_max": p.rotor_sideband_db_max,
+            }
+            for p in history.points[-8:]
+        ],
+        "reference_limits": {
+            "thd_percent_max_ieee519": 5.0,
+            "current_unbalance_percent_max": 2.0,
+            "crest_factor_healthy_band": [1.40, 1.45],
+        },
+    }
+    if predicted is not None:
+        context["system_reference_protocol_amharic"] = (
+            AMHARIC_PROTOCOLS.get(predicted, "")
+        )
+
+    started = _time.monotonic()
+    try:
+        result = await ai_client.generate_explanation(context)
+    except AIProviderNotConfigured as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except AIExplanationError as exc:
+        logger.warning("AI explanation failed for %s: %s", motor_id, exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    elapsed_ms = int((_time.monotonic() - started) * 1000)
+
+    return AIExplainResponse(
+        motor_id=motor_id,
+        provider=result["provider"],
+        model=result["model"],
+        generated_at=datetime.now(timezone.utc),
+        analysis_am=result["analysis_am"],
+        analysis_en=result["analysis_en"],
+        elapsed_ms=elapsed_ms,
+        data_context=context,
+    )
 
 
 @app.get("/api/v2/models/active")
