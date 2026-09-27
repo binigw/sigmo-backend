@@ -48,6 +48,7 @@ VALID_SCOPES = frozenset({"device", "dashboard", "admin"})
 PROTECTED: tuple[tuple[str, tuple[str, ...], frozenset[str]], ...] = (
     ("/api/v2/telemetry", ("POST",), frozenset({"device", "admin"})),
     ("/api/v2/motors", ("GET",), frozenset({"dashboard", "admin"})),
+    ("/api/v2/faults", ("GET",), frozenset({"dashboard", "admin"})),
     ("/api/v2/views", ("GET",), frozenset({"dashboard", "admin"})),
     ("/api/v2/admin", ("GET", "PUT", "POST", "DELETE"),
      frozenset({"admin"})),

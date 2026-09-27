@@ -190,6 +190,83 @@ class CaptureRepository(SigmoRepository):
         newest = recent[-limit:] if limit < len(recent) else recent
         return [_sql_shape(r) for r in newest]
 
+    async def log_fault(
+        self,
+        motor_id: str,
+        taxonomy_code: str,
+        urgency_stage: int,
+        model_confidence: float,
+        population_sigma: float,
+        absolute_threshold_breached: bool,
+        trend_confirmed: bool,
+        spectral_evidence: dict,
+    ) -> int:
+        """Capture the fault_logs wire write; computes the generated
+        four_signal_confirmed column exactly as the SQL schema does."""
+        if self.outage:
+            raise ConnectionError("simulated Supabase outage")
+        # Re-run the REAL validation from the parent class.
+        if not 1 <= urgency_stage <= 4:
+            raise ValueError(
+                f"urgency_stage must be 1-4, got {urgency_stage}"
+            )
+        if not 0.0 <= model_confidence <= 1.0:
+            raise ValueError(
+                f"model_confidence must be 0-1, got {model_confidence}"
+            )
+        self._fault_seq += 1
+        self.fault_rows.append({
+            "id": self._fault_seq,
+            "motor_id": motor_id,
+            "detected_at": datetime.now(timezone.utc),
+            "taxonomy_code": taxonomy_code,
+            "urgency_stage": urgency_stage,
+            "model_confidence": model_confidence,
+            "population_sigma": population_sigma,
+            "absolute_threshold_breached": absolute_threshold_breached,
+            "trend_confirmed": trend_confirmed,
+            "four_signal_confirmed": (
+                population_sigma > 5.0
+                and absolute_threshold_breached
+                and model_confidence > 0.70
+                and trend_confirmed
+            ),
+            "physically_verified": False,
+            "verified_by": None,
+            "spectral_evidence": spectral_evidence,
+            "resolved_at": None,
+        })
+        return self._fault_seq
+
+    async def get_latest_fault_episode(self, motor_id: str):
+        if self.outage:
+            raise ConnectionError("simulated Supabase outage")
+        rows = [
+            r for r in self.fault_rows if r["motor_id"] == motor_id
+        ]
+        if not rows:
+            return None
+        latest = max(rows, key=lambda r: r["detected_at"])
+        return {
+            "taxonomy_code": latest["taxonomy_code"],
+            "detected_at": latest["detected_at"],
+            "resolved_at": latest["resolved_at"],
+        }
+
+    async def fetch_fault_logs(self, motor_id, limit):
+        """Same semantics as the SQL read: newest first, optional
+        per-motor filter, capped at limit."""
+        if self.outage:
+            raise ConnectionError("simulated Supabase outage")
+        rows = [
+            r for r in self.fault_rows
+            if motor_id is None or r["motor_id"] == motor_id
+        ]
+        newest = sorted(
+            rows, key=lambda r: r["detected_at"], reverse=True
+        )[:limit]
+        return [dict(r) for r in newest]
+
     async def fetch_health_index_history(self, motor_id: str, lookback_days: int):
         """Same semantics as the SQL read: INRUSH rows excluded, earliest
         row, latest row, and the lookback-window samples ascending."""
@@ -228,6 +305,11 @@ class CaptureRepository(SigmoRepository):
         # Motors for which the wire raises the REAL Supabase FK
         # error (unregistered at flush time after an outage).
         self.fk_motors: set[str] = set()
+        # Fault-episode capture (Section 10 audit trail): mirrors
+        # the fault_logs wire, including the DB-computed
+        # four_signal_confirmed generated column.
+        self.fault_rows: list[dict] = []
+        self._fault_seq = 0
 
     async def upsert_motor_asset(self, asset: dict) -> bool:
         if self.outage:

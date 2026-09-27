@@ -21,6 +21,9 @@ Endpoints:
                              worst-phase power quality, mechanical
                              signature and the persisted verdict per
                              window, oldest-first)
+  GET  /api/v2/faults    — fault episode history (Section 10 permanent
+                           retention; Section 11.6 four-signal evidence
+                           per episode, newest first)
   GET  /api/v2/models/active — ACTIVE classifier version metadata
   GET  /api/v2/views/executive
                            — Section 6.a Executive payload (one JSON:
@@ -73,6 +76,7 @@ from .api.schemas import (
     TelemetryFrame,
     MotorsOverviewPayload,
     TrendsPayload,
+    FaultLogsPayload,
 )
 from .config import API
 from .db.repository import SigmoRepository
@@ -249,6 +253,30 @@ async def motor_history(
         logger.exception("History failure for motor %s", motor_id)
         raise HTTPException(
             status_code=500, detail=f"History error: {exc}"
+        ) from exc
+
+
+@app.get("/api/v2/faults", response_model=FaultLogsPayload)
+async def faults(
+    motor_id: str | None = Query(None),
+    limit: int = Query(200, ge=1, le=1000),
+) -> FaultLogsPayload:
+    """Fault episode history (Section 10 permanent retention).
+
+    Newest fault log rows first — all motors, or one motor when
+    ``motor_id`` is given. Each row carries the exact taxonomy code,
+    urgency stage, the four Section 11.6 anti-false-positive signals
+    (with the database-computed four_signal_confirmed) and the
+    quantitative spectral evidence of the detection window. Fault rows
+    are written by the ingestion path when a NEW fault episode starts
+    (episode dedup on the taxonomy code).
+    """
+    try:
+        return await service.fault_logs(motor_id, limit)
+    except Exception as exc:
+        logger.exception("Fault logs read failure")
+        raise HTTPException(
+            status_code=500, detail=f"Fault logs error: {exc}"
         ) from exc
 
 

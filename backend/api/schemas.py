@@ -424,6 +424,55 @@ class TrendsPayload(BaseModel):
     )
 
 
+class FaultLogEntry(BaseModel):
+    """One persisted fault episode (Section 10 permanent retention)."""
+
+    id: int
+    motor_id: str
+    detected_at: datetime
+    taxonomy_code: str = Field(
+        description="Exact taxonomy code, e.g. 'Stage 2 — ... (CLASS)'."
+    )
+    urgency_stage: int = Field(ge=1, le=4)
+    model_confidence: float = Field(ge=0.0, le=1.0)
+    population_sigma: float = Field(
+        description="Baseline deviation (zscore_max) at detection time."
+    )
+    absolute_threshold_breached: bool
+    trend_confirmed: bool = Field(
+        description=(
+            "Section 11.6 temporal confirmation: the rolling-majority "
+            "vote of the last 5 windows agrees with this verdict."
+        )
+    )
+    four_signal_confirmed: bool = Field(
+        description=(
+            "All four Section 11.6 anti-false-positive signals held: "
+            "sigma > 5, absolute threshold, confidence > 0.70, trend."
+        )
+    )
+    physically_verified: bool = False
+    verified_by: str | None = None
+    spectral_evidence: dict[str, object] = Field(
+        description="Quantitative DSP evidence of the detection window."
+    )
+    resolved_at: datetime | None = None
+
+
+class FaultLogsPayload(BaseModel):
+    """GET /api/v2/faults — newest fault episodes, newest first."""
+
+    generated_at: datetime
+    database_connected: bool
+    motor_id: str | None = Field(
+        default=None,
+        description="Filter that was applied (null = all motors).",
+    )
+    limit: int
+    returned: int
+    faults: list[FaultLogEntry]
+
+
 class MccPanelLocation(BaseModel):
     """Section 6.b ``mcc_panel_location`` — physical hardware location."""
 

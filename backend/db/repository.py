@@ -471,6 +471,86 @@ class SigmoRepository:
         return [dict(r) for r in reversed(rows)]
 
     # ------------------------------------------------------------------
+    # Fault log read/episode path (Section 10 permanent retention)
+    # ------------------------------------------------------------------
+    async def get_latest_fault_episode(
+        self, motor_id: str
+    ) -> dict[str, Any] | None:
+        """Newest fault_logs row of one motor (episode-dedup probe).
+
+        Pure read: the ingestion path calls this before writing a fault
+        row so an ONGOING episode (same taxonomy code, unresolved)
+        never produces duplicate rows — one row per fault episode.
+        """
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT taxonomy_code, detected_at, resolved_at
+                FROM fault_logs
+                WHERE motor_id = $1
+                ORDER BY detected_at DESC
+                LIMIT 1
+                """,
+                motor_id,
+            )
+        return dict(row) if row is not None else None
+
+    async def fetch_fault_logs(
+        self, motor_id: str | None, limit: int
+    ) -> list[dict[str, Any]]:
+        """Newest fault log rows (Section 10: permanently retained).
+
+        All motors, or one motor when ``motor_id`` is given, newest
+        first, capped at ``limit``. ``spectral_evidence`` is JSONB:
+        asyncpg has no jsonb codec installed, so the column arrives as
+        a JSON string and is decoded here (str|dict tolerant for the
+        test harness). Pure read path.
+        """
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            if motor_id is None:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, motor_id, detected_at, taxonomy_code,
+                           urgency_stage, model_confidence, population_sigma,
+                           absolute_threshold_breached, trend_confirmed,
+                           four_signal_confirmed, physically_verified,
+                           verified_by, spectral_evidence, resolved_at
+                    FROM fault_logs
+                    ORDER BY detected_at DESC
+                    LIMIT $1
+                    """,
+                    int(limit),
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, motor_id, detected_at, taxonomy_code,
+                           urgency_stage, model_confidence, population_sigma,
+                           absolute_threshold_breached, trend_confirmed,
+                           four_signal_confirmed, physically_verified,
+                           verified_by, spectral_evidence, resolved_at
+                    FROM fault_logs
+                    WHERE motor_id = $1
+                    ORDER BY detected_at DESC
+                    LIMIT $2
+                    """,
+                    motor_id, int(limit),
+                )
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            evidence = record.get("spectral_evidence")
+            if isinstance(evidence, str):
+                try:
+                    record["spectral_evidence"] = json.loads(evidence)
+                except (TypeError, ValueError):
+                    record["spectral_evidence"] = {}
+            out.append(record)
+        return out
+
+    # ------------------------------------------------------------------
     # Deterministic RUL history fetch (Section 14.2)
     # ------------------------------------------------------------------
     async def fetch_health_index_history(

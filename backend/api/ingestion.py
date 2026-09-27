@@ -49,6 +49,8 @@ from .schemas import (
     CriticalAssetRiskSummary,
     ExecutiveViewPayload,
     FaultAssessment,
+    FaultLogEntry,
+    FaultLogsPayload,
     FaultUrgencyStage,
     FinancialAmount,
     MccPanelLocation,
@@ -335,6 +337,104 @@ class IngestionService:
             return True
         return False
 
+    async def _log_fault_episode(
+        self,
+        motor_id: str,
+        features: ThreePhaseFeatures,
+        gating: GatingResult,
+        verdict: dict[str, object],
+    ) -> None:
+        """Persist one fault episode row (Section 10 permanent retention).
+
+        Episode trigger: the window's gate status is ANOMALY (objective
+        DSP evidence) and the classifier verdict names a fault — the
+        multi-signal principle of Section 11.6. Episode dedup: the
+        newest existing row of this motor is probed first — an ONGOING
+        episode (same taxonomy code, unresolved) never duplicates; only
+        a NEW episode (different code, or first ever) is written. The row records the four Section 11.6
+        anti-false-positive signals verbatim; four_signal_confirmed is
+        computed by the database. Fail-soft by design: a fault-log
+        write failure (e.g. mid-outage) is logged and swallowed —
+        telemetry ingestion must never be blocked by the audit trail.
+        """
+        predicted = str(verdict["predicted_class"])
+        confidence = float(verdict["confidence"])
+        zscore = float(gating.zscore_max)
+        absolute_breach = bool(gating.breaches)
+        aggregation = verdict.get("temporal_aggregation") or {}
+        trend_confirmed = bool(
+            aggregation
+            and aggregation.get("stable")
+            and aggregation.get("aggregated_class") == predicted
+        )
+        stage = classify_stage(
+            zscore_max=zscore,
+            gating_status=gating.status,
+            predicted_class=predicted,
+            rul_days_numeric=None,
+            rul_status=None,
+        )
+        taxonomy_code = exact_taxonomy_code(stage.stage, predicted)
+        try:
+            latest = await self._repo.get_latest_fault_episode(motor_id)
+            if latest is not None and latest["taxonomy_code"] == taxonomy_code:
+                return  # ongoing episode — no duplicate rows
+            await self._repo.log_fault(
+                motor_id=motor_id,
+                taxonomy_code=taxonomy_code,
+                urgency_stage=stage.stage,
+                model_confidence=confidence,
+                population_sigma=zscore,
+                absolute_threshold_breached=absolute_breach,
+                trend_confirmed=trend_confirmed,
+                spectral_evidence={
+                    "fundamental_hz": features.mean_fundamental_hz,
+                    "thd_percent_max": max(
+                        features.phase_a.thd_percent,
+                        features.phase_b.thd_percent,
+                        features.phase_c.thd_percent,
+                    ),
+                    "current_unbalance_percent": (
+                        features.current_unbalance_percent
+                    ),
+                    "crest_factor_max": max(
+                        features.phase_a.crest_factor,
+                        features.phase_b.crest_factor,
+                        features.phase_c.crest_factor,
+                    ),
+                    "rotor_sideband_db_max": max(
+                        features.phase_a.rotor_sideband_ratio_db,
+                        features.phase_b.rotor_sideband_ratio_db,
+                        features.phase_c.rotor_sideband_ratio_db,
+                    ),
+                    "envelope_peak_hz": [
+                        features.phase_a.envelope_peak_hz,
+                        features.phase_b.envelope_peak_hz,
+                        features.phase_c.envelope_peak_hz,
+                    ],
+                    "rotor_sideband_db": [
+                        features.phase_a.rotor_sideband_ratio_db,
+                        features.phase_b.rotor_sideband_ratio_db,
+                        features.phase_c.rotor_sideband_ratio_db,
+                    ],
+                    "absolute_threshold_breaches": list(gating.breaches),
+                    "zscore_max": zscore,
+                    "model_version": str(verdict["model_version"]),
+                },
+            )
+            logger.info(
+                "Fault episode logged motor=%s code=%s stage=%d "
+                "conf=%.2f sigma=%.2f abs=%s trend=%s",
+                motor_id, taxonomy_code, stage.stage, confidence,
+                zscore, absolute_breach, trend_confirmed,
+            )
+        except Exception as exc:
+            logger.error(
+                "Fault episode log failed for motor %s (%s) — ingestion "
+                "continues; the audit row for this episode is lost.",
+                motor_id, exc,
+            )
+
     async def ingest(self, frame: TelemetryFrame) -> tuple[float, WindowAnalysis | None]:
         """Process one frame; returns (window_fill_percent, analysis or None)."""
         # Commissioning gate: reject the FIRST frame of an unregistered
@@ -458,6 +558,18 @@ class IngestionService:
                 ],
                 crest_factor_max=analysis.crest_factor_max,
             )
+            # Fault episode audit trail (Section 10): one row per NEW
+            # fault episode — anomalous gate (DSP z-score / absolute
+            # threshold evidence) PLUS a non-HEALTHY classifier verdict.
+            # A lone classifier verdict never creates audit rows
+            # (Section 11.6 multi-signal principle). Fail-soft.
+            if (
+                analysis.dominant_fault not in (None, "HEALTHY")
+                and gating.status == "ANOMALY"
+            ):
+                await self._log_fault_episode(
+                    frame.motor_id, features, gating, verdict
+                )
         logger.info(
             "Window analyzed motor=%s status=%s fund=%.2fHz thd=%.2f%% unb=%.2f%%"
             " verdict=%s conf=%.2f",
@@ -1116,6 +1228,50 @@ class IngestionService:
                 hours=hours, limit=limit, returned=len(points)
             ),
             points=points,
+        )
+
+    async def fault_logs(
+        self, motor_id: str | None, limit: int
+    ) -> FaultLogsPayload:
+        """Newest fault episodes for the Fault Logs page (Section 10).
+
+        All motors or one motor, newest first. Fault rows are written
+        by the ingestion path when a NEW fault episode starts (episode
+        dedup on the taxonomy code) and are permanently retained.
+        """
+        rows = await self._repo.fetch_fault_logs(motor_id, limit)
+        entries = [
+            FaultLogEntry(
+                id=int(row["id"]),
+                motor_id=str(row["motor_id"]),
+                detected_at=row["detected_at"],
+                taxonomy_code=str(row["taxonomy_code"]),
+                urgency_stage=int(row["urgency_stage"]),
+                model_confidence=float(row["model_confidence"]),
+                population_sigma=float(row["population_sigma"]),
+                absolute_threshold_breached=bool(
+                    row["absolute_threshold_breached"]
+                ),
+                trend_confirmed=bool(row["trend_confirmed"]),
+                four_signal_confirmed=bool(row["four_signal_confirmed"]),
+                physically_verified=bool(row["physically_verified"]),
+                verified_by=row.get("verified_by"),
+                spectral_evidence=(
+                    row["spectral_evidence"]
+                    if isinstance(row["spectral_evidence"], dict)
+                    else {}
+                ),
+                resolved_at=row.get("resolved_at"),
+            )
+            for row in rows
+        ]
+        return FaultLogsPayload(
+            generated_at=datetime.now(timezone.utc),
+            database_connected=True,
+            motor_id=motor_id,
+            limit=limit,
+            returned=len(entries),
+            faults=entries,
         )
 
     async def technician_view(self, motor_id: str) -> TechnicianViewPayload:
