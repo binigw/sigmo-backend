@@ -10,7 +10,7 @@ technician in BOTH Amharic and English.
 Providers (first configured key wins, or set AI_PROVIDER explicitly):
   openai    -> OPENAI_API_KEY    (model OPENAI_MODEL, default gpt-4o-mini)
   deepseek  -> DEEPSEEK_API_KEY  (model DEEPSEEK_MODEL, default deepseek-chat)
-  gemini    -> GEMINI_API_KEY    (model GEMINI_MODEL, default gemini-2.0-flash)
+  gemini    -> GEMINI_API_KEY    (model GEMINI_MODEL, default gemini-3.8-flash)
 
 Zero-fake-code directive: with no key configured the caller gets an
 honest AIProviderNotConfigured error (HTTP 503 with setup guidance) —
@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any
 
 import httpx
@@ -35,7 +36,7 @@ PROVIDER_ENV: dict[str, tuple[str, str, str]] = {
     # provider -> (api key env var, model env var, default model)
     "openai": ("OPENAI_API_KEY", "OPENAI_MODEL", "gpt-4o-mini"),
     "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "deepseek-chat"),
-    "gemini": ("GEMINI_API_KEY", "GEMINI_MODEL", "gemini-2.0-flash"),
+    "gemini": ("GEMINI_API_KEY", "GEMINI_MODEL", "gemini-3.8-flash"),
 }
 
 SYSTEM_PROMPT = """\
@@ -96,6 +97,19 @@ class AIExplanationError(RuntimeError):
     """The configured provider failed or returned an unusable answer."""
 
 
+# Zero-width / bidi control characters survive .strip() but break real API
+# keys when a key is pasted from chat apps or formatted documents (seen in
+# production: a trailing U+200E left-to-right mark caused key rejection).
+_INVISIBLE_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]")
+
+
+def _clean_secret(raw: str | None) -> str:
+    """Strip whitespace and invisible control characters from a secret."""
+    if not raw:
+        return ""
+    return _INVISIBLE_RE.sub("", raw).strip()
+
+
 def resolve_provider() -> tuple[str, str, str]:
     """(provider, api_key, model) from the environment.
 
@@ -119,9 +133,9 @@ def resolve_provider() -> tuple[str, str, str]:
         order = list(PROVIDER_ENV)
     for provider in order:
         key_env, model_env, default_model = PROVIDER_ENV[provider]
-        api_key = os.environ.get(key_env, "").strip()
+        api_key = _clean_secret(os.environ.get(key_env))
         if api_key:
-            model = os.environ.get(model_env, "").strip() or default_model
+            model = _clean_secret(os.environ.get(model_env)) or default_model
             return provider, api_key, model
     raise AIProviderNotConfigured(
         "No AI provider configured. Add ONE of OPENAI_API_KEY, "

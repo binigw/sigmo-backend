@@ -144,7 +144,7 @@ motor technician in Amharic AND English. The route returns an honest
 |---|---|
 | `OPENAI_API_KEY` | Use OpenAI (default model `gpt-4o-mini`) |
 | `DEEPSEEK_API_KEY` | Use DeepSeek (default model `deepseek-chat`) |
-| `GEMINI_API_KEY` | Use Google Gemini (default model `gemini-2.0-flash`) |
+| `GEMINI_API_KEY` | Use Google Gemini (default model `gemini-3.8-flash`) |
 | `AI_PROVIDER` | Optional: force `openai`, `deepseek` or `gemini` |
 | `OPENAI_MODEL` / `DEEPSEEK_MODEL` / `GEMINI_MODEL` | Optional model override |
 

@@ -216,6 +216,19 @@ async def run() -> None:
         f"json_ok, markers_ok, garbage_fails={parse_fail}",
     )
 
+    # ---- AI7: pasted-key hygiene + pinned default model ---------------
+    os.environ["GEMINI_API_KEY"] = "AIza-clean\u200e\n"
+    provider3, key3, model3 = resolve_provider()
+    os.environ.pop("GEMINI_API_KEY", None)
+    check(
+        "AI7 key sanitization (invisible marks stripped, default model "
+        "pinned)",
+        provider3 == "gemini"
+        and key3 == "AIza-clean"
+        and model3 == "gemini-3.8-flash",
+        f"provider={provider3}, key={key3!r}, model={model3}",
+    )
+
     print()
     if failures:
         print(f"RESULT: {len(failures)} FAILURE(S): {failures}")
