@@ -31,6 +31,10 @@ from ..analysis.repair_protocols_am import (
     TOOLS_AND_SPARES,
     exact_taxonomy_code,
 )
+from ..analysis.repair_protocols_en import (
+    ENGLISH_PROTOCOLS,
+    TOOLS_AND_SPARES_EN,
+)
 from ..analysis.rul import RulStatus, assess_rul
 from ..analysis.staging import (
     classify_stage,
@@ -1628,7 +1632,9 @@ class IngestionService:
         if predicted is not None:
             taxonomy_code = exact_taxonomy_code(stage.stage, predicted)
             protocol = AMHARIC_PROTOCOLS[predicted]
+            protocol_en = ENGLISH_PROTOCOLS[predicted]
             tools = list(TOOLS_AND_SPARES[predicted])
+            tools_en = list(TOOLS_AND_SPARES_EN[predicted])
         else:
             taxonomy_code = (
                 f"Stage {stage.stage} — Pending First Steady-State "
@@ -1640,10 +1646,22 @@ class IngestionService:
                 "እንዲሰበስብ ይጠበቃል። እስከዚያው የበርካታ አስፈላጊ አደጋ "
                 "አልተለየም፤ የመሰረታዊ ደህንነት ምርመራዎችን ብቻ ይከታተሉ።"
             )
+            protocol_en = (
+                "The first steady-state window has not been recorded "
+                "yet — to give a definite classified verdict the motor "
+                "must collect at least one full window (32,768 "
+                "samples). Until then no critical action is required; "
+                "continue the basic safety checks only."
+            )
             tools = [
                 "የተለመዱ የግሪስ እና የንጽህና መሣሪያዎች",
                 "IR thermometer (የሙቀት መለኪያ)",
                 "Clamp meter (የካረንት መለኪያ)",
+            ]
+            tools_en = [
+                "Standard grease gun and cleaning tools",
+                "IR thermometer",
+                "Clamp meter",
             ]
 
         registered = asset is not None
@@ -1717,8 +1735,10 @@ class IngestionService:
                 zscore_baseline_deviation=float(state["zscore_max"]),
             ),
             amharic_repair_protocol=protocol,
+            repair_protocol_en=protocol_en,
             required_tools_and_spares=RequiredToolsAndSpares(
                 items=tools,
+                items_en=tools_en,
                 asset_bearing_part_number=asset_bearing,
                 asset_capacitor_spec=asset_cap,
                 registry_note=registry_note,

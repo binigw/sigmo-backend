@@ -620,6 +620,11 @@ class RequiredToolsAndSpares(BaseModel):
     """Section 6.b ``required_tools_and_spares``."""
 
     items: list[str]
+    items_en: list[str] = Field(
+        default_factory=list,
+        description="English display edition of the tools list "
+        "(same order as ``items``; empty only when unavailable)."
+    )
     asset_bearing_part_number: str | None = Field(
         description="Exact bearing part number from the asset registry; "
         "null when not registered (never invented)."
@@ -659,7 +664,15 @@ class TechnicianViewPayload(BaseModel):
     )
     model_confidence: float | None = None
     spectral_evidence_data: SpectralEvidenceData
-    amharic_repair_protocol: str
+    amharic_repair_protocol: str = Field(
+        description="Canonical Amharic rulebook repair protocol "
+        "(SIGMO_RULES.md Section 6.b). Field name is part of the "
+        "public API contract and must not change."
+    )
+    repair_protocol_en: str = Field(
+        description="English display edition of the repair protocol — "
+        "identical steps/limits, translated for the EN UI toggle."
+    )
     required_tools_and_spares: RequiredToolsAndSpares
     fault_urgency_stage: FaultUrgencyStage
 
