@@ -420,6 +420,57 @@ class SigmoRepository:
         return dict(row) if row is not None else None
 
     # ------------------------------------------------------------------
+    # Analytics trends fetch (steady-state window series)
+    # ------------------------------------------------------------------
+    async def fetch_telemetry_history(
+        self, motor_id: str, hours: int, limit: int
+    ) -> list[dict[str, Any]]:
+        """Steady-state window history for one motor (Analytics trends).
+
+        The newest ``limit`` non-inrush telemetry rows inside the last
+        ``hours`` wall-clock hours, returned OLDEST-FIRST (chart-ready).
+        INRUSH_SUPPRESSED rows are excluded — startup transients are not
+        a health state (same exclusion as Section 14.2.2, the assessment
+        read and the plant-wide read). Raises ValueError("No telemetry
+        recorded ...") when the motor has no telemetry row at all (the
+        route maps that to 404). Pure read path: one connection, two
+        statements, no writes.
+        """
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            known = await conn.fetchval(
+                """
+                SELECT EXISTS(
+                    SELECT 1 FROM telemetry_features WHERE motor_id = $1
+                )
+                """,
+                motor_id,
+            )
+            if not known:
+                raise ValueError(
+                    f"No telemetry recorded for motor {motor_id!r}"
+                )
+            rows = await conn.fetch(
+                """
+                SELECT recorded_at, status, fundamental_hz,
+                       rms_a, rms_b, rms_c,
+                       thd_percent_a, thd_percent_b, thd_percent_c,
+                       crest_factor_a, crest_factor_b, crest_factor_c,
+                       rotor_sideband_db_a, rotor_sideband_db_b,
+                       rotor_sideband_db_c,
+                       unbalance_percent, zscore_max,
+                       predicted_class, model_confidence, model_version
+                FROM telemetry_features
+                WHERE motor_id = $1 AND status <> 'INRUSH_SUPPRESSED'
+                  AND recorded_at >= now() - make_interval(hours => $2)
+                ORDER BY recorded_at DESC
+                LIMIT $3
+                """,
+                motor_id, int(hours), int(limit),
+            )
+        return [dict(r) for r in reversed(rows)]
+
+    # ------------------------------------------------------------------
     # Deterministic RUL history fetch (Section 14.2)
     # ------------------------------------------------------------------
     async def fetch_health_index_history(

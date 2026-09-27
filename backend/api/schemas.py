@@ -354,6 +354,76 @@ class MotorsOverviewPayload(BaseModel):
     motors: list[MotorOverviewEntry]
 
 
+class TrendPoint(BaseModel):
+    """One steady-state window in the per-motor analytics time series."""
+
+    recorded_at: datetime
+    status: Literal["HEALTHY", "ANOMALY"]
+    health_percent: float = Field(
+        ge=0.0,
+        le=100.0,
+        description="Section 14.5 health index (z-score anchored), 0-100.",
+    )
+    zscore_max: float = Field(
+        description="Largest baseline z-score of the window (sigma)."
+    )
+    thd_percent_max: float = Field(
+        description="Worst-phase current THD (%)."
+    )
+    unbalance_percent: float = Field(
+        description="Current unbalance (%)."
+    )
+    crest_factor_max: float = Field(
+        description="Worst-phase crest factor (unitless)."
+    )
+    rotor_sideband_db_max: float = Field(
+        description="Worst-phase rotor sideband level (dB)."
+    )
+    fundamental_hz: float
+    rms_a: float
+    rms_b: float
+    rms_c: float
+    predicted_class: str | None = Field(
+        default=None,
+        description=(
+            "Persisted v6c dominant-fault verdict; null for windows "
+            "written before the Phase-4 wiring, degraded-mode windows, "
+            "or HEALTHY windows the classifier never labelled."
+        ),
+    )
+    model_confidence: float | None = Field(
+        default=None, ge=0.0, le=1.0
+    )
+
+
+class TrendsWindow(BaseModel):
+    """Echo of the request bounds plus honest row accounting."""
+
+    hours: int
+    limit: int
+    returned: int
+
+
+class TrendsPayload(BaseModel):
+    """GET /api/v2/motors/{motor_id}/history — steady-state window series.
+
+    Source for the dashboard Analytics trends charts. INRUSH_SUPPRESSED
+    windows are excluded (startup transients are not a health state —
+    same exclusion as Section 14.2.2 and the assessment read). An empty
+    ``points`` list means the motor has telemetry, just none inside the
+    requested window: honest absence, never fabricated rows.
+    """
+
+    motor_id: str
+    generated_at: datetime
+    model_version: str
+    database_connected: bool
+    window: TrendsWindow
+    points: list[TrendPoint] = Field(
+        description="Ascending by recorded_at (oldest first, chart-ready)."
+    )
+
+
 class MccPanelLocation(BaseModel):
     """Section 6.b ``mcc_panel_location`` — physical hardware location."""
 

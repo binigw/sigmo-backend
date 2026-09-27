@@ -15,6 +15,12 @@ Endpoints:
                              snapshot, v6c dominant-fault verdict with
                              probabilities + temporal aggregation, and
                              the deterministic Section 14 RUL estimate
+  GET  /api/v2/motors/{motor_id}/history
+                           — steady-state window series for the Analytics
+                             trends charts (Section 14.5 health index,
+                             worst-phase power quality, mechanical
+                             signature and the persisted verdict per
+                             window, oldest-first)
   GET  /api/v2/models/active — ACTIVE classifier version metadata
   GET  /api/v2/views/executive
                            — Section 6.a Executive payload (one JSON:
@@ -49,7 +55,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -66,6 +72,7 @@ from .api.schemas import (
     TechnicianViewPayload,
     TelemetryFrame,
     MotorsOverviewPayload,
+    TrendsPayload,
 )
 from .config import API
 from .db.repository import SigmoRepository
@@ -211,6 +218,38 @@ async def motor_assessment(motor_id: str) -> MotorAssessment:
     except Exception as exc:
         logger.exception("Assessment failure for motor %s", motor_id)
         raise HTTPException(status_code=500, detail=f"Assessment error: {exc}") from exc
+
+
+@app.get("/api/v2/motors/{motor_id}/history", response_model=TrendsPayload)
+async def motor_history(
+    motor_id: str,
+    hours: int = Query(168, ge=1, le=720),
+    limit: int = Query(500, ge=1, le=2000),
+) -> TrendsPayload:
+    """Per-motor steady-state window history (Analytics trends source).
+
+    The newest non-inrush telemetry windows of the last ``hours`` hours
+    (default 168 = 7 days), capped at ``limit`` rows, returned
+    oldest-first. Each point carries the Section 14.5 health index,
+    worst-phase power-quality features (THD, unbalance, crest, rotor
+    sideband) and the persisted v6c verdict. Raises 404 when the motor
+    has no telemetry at all; an empty ``points`` list means the motor
+    has telemetry, just none inside the requested window (honest
+    absence, never fabricated rows).
+    """
+    try:
+        return await service.telemetry_history(
+            motor_id, hours=hours, limit=limit
+        )
+    except ValueError as exc:
+        if "No telemetry recorded" in str(exc):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise
+    except Exception as exc:
+        logger.exception("History failure for motor %s", motor_id)
+        raise HTTPException(
+            status_code=500, detail=f"History error: {exc}"
+        ) from exc
 
 
 @app.get("/api/v2/models/active")

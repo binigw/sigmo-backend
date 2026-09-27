@@ -61,6 +61,9 @@ from .schemas import (
     SpectralEvidenceData,
     TechnicianViewPayload,
     TelemetryFrame,
+    TrendPoint,
+    TrendsPayload,
+    TrendsWindow,
     WindowAnalysis,
     MotorsOverviewPayload,
     MotorOverviewEntry,
@@ -1046,6 +1049,73 @@ class IngestionService:
             model_version=self.model_version or "unavailable",
             database_connected=db_ok,
             motors=entries,
+        )
+
+    async def telemetry_history(
+        self, motor_id: str, hours: int, limit: int
+    ) -> TrendsPayload:
+        """Steady-state window history for the Analytics trends charts.
+
+        Persistence-only read (the live in-RAM verdicts are single-window
+        state, not a series): the newest ``limit`` non-inrush windows of
+        the last ``hours`` hours, oldest-first. Per-window health percent
+        uses the same Section 14.5 mapping as the overview; worst-phase
+        THD / crest / sideband mirror the snapshot derivation. Raises
+        ValueError("No telemetry recorded ...") for unknown motors (the
+        route maps it to 404); a motor with telemetry outside the window
+        returns an honest empty points list.
+        """
+        rows = await self._repo.fetch_telemetry_history(
+            motor_id, hours, limit
+        )
+        points: list[TrendPoint] = []
+        for row in rows:
+            zscore_max = float(row["zscore_max"])
+            confidence = row.get("model_confidence")
+            predicted = row.get("predicted_class")
+            points.append(
+                TrendPoint(
+                    recorded_at=row["recorded_at"],
+                    status=str(row["status"]),
+                    health_percent=motor_health_percent(zscore_max),
+                    zscore_max=zscore_max,
+                    thd_percent_max=max(
+                        float(row["thd_percent_a"]),
+                        float(row["thd_percent_b"]),
+                        float(row["thd_percent_c"]),
+                    ),
+                    unbalance_percent=float(row["unbalance_percent"]),
+                    crest_factor_max=max(
+                        float(row["crest_factor_a"]),
+                        float(row["crest_factor_b"]),
+                        float(row["crest_factor_c"]),
+                    ),
+                    rotor_sideband_db_max=max(
+                        float(row["rotor_sideband_db_a"]),
+                        float(row["rotor_sideband_db_b"]),
+                        float(row["rotor_sideband_db_c"]),
+                    ),
+                    fundamental_hz=float(row["fundamental_hz"]),
+                    rms_a=float(row["rms_a"]),
+                    rms_b=float(row["rms_b"]),
+                    rms_c=float(row["rms_c"]),
+                    predicted_class=(
+                        str(predicted) if predicted is not None else None
+                    ),
+                    model_confidence=(
+                        float(confidence) if confidence is not None else None
+                    ),
+                )
+            )
+        return TrendsPayload(
+            motor_id=motor_id,
+            generated_at=datetime.now(timezone.utc),
+            model_version=self.model_version or "unavailable",
+            database_connected=True,
+            window=TrendsWindow(
+                hours=hours, limit=limit, returned=len(points)
+            ),
+            points=points,
         )
 
     async def technician_view(self, motor_id: str) -> TechnicianViewPayload:
