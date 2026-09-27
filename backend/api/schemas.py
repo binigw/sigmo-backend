@@ -333,7 +333,10 @@ class MotorOverviewEntry(BaseModel):
     predicted_class: str | None = None
     model_confidence: float | None = None
     health_percent: float | None = Field(
-        description="Section 14.5 health index, 0-100 (z-score anchored)."
+        description="Operator health score 0-100: z-anchored base "
+        "(Section 14.5), capped into the fault-stage band while a "
+        "fault condition is active (Stage 2 -> 60-80, Stage 3 -> "
+        "40-60, Stage 4 -> 0-40)."
     )
     stage: int = Field(description="Stage 1-4 (deterministic engine).")
     stage_label: str
@@ -362,7 +365,9 @@ class TrendPoint(BaseModel):
     health_percent: float = Field(
         ge=0.0,
         le=100.0,
-        description="Section 14.5 health index (z-score anchored), 0-100.",
+        description="Operator health score 0-100 (z-anchored base, "
+        "capped into the fault-stage band while a fault condition was "
+        "active on that window).",
     )
     zscore_max: float = Field(
         description="Largest baseline z-score of the window (sigma)."

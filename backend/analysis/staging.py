@@ -156,6 +156,59 @@ def plant_health_index(zscores: list[float]) -> float | None:
 
 
 # ----------------------------------------------------------------------
+# Operator-facing health score (commercial release consistency fix)
+#
+# The pure z-score mapping above cannot drop for mechanical faults
+# (bearing outer-race, rotor bars) that barely move the electrical
+# population z-score — a Stage 2 bearing motor showed "100 % HEALTH"
+# next to a High alert. Whenever an ACTIVE fault condition exists
+# (non-HEALTHY classifier verdict, or Stage >= 2 for any reason), the
+# score is capped into a deterministic stage band; the z-anchored base
+# positions the motor WITHIN the band so worse population deviation
+# still scores lower. Section 14.5 z-anchored series (RUL engine)
+# deliberately keeps the pure mapping — it must stay monotone in z.
+# ----------------------------------------------------------------------
+FAULT_STAGE_HEALTH_BANDS: dict[int, tuple[float, float]] = {
+    1: (80.0, 95.0),   # early verdict — mild penalty
+    2: (60.0, 80.0),   # moderate / early-stage fault
+    3: (40.0, 60.0),   # severe risk
+    4: (0.0, 40.0),    # critical failure risk
+}
+
+
+def assessed_health_percent(
+    zscore_max: float, *, stage: int, predicted_class: str | None
+) -> float:
+    """Operator health score: z-anchored base capped into the stage
+    band while a fault condition is active.
+
+    healthy (HEALTHY/None verdict AND stage < 2): the pure Section 14.5
+    mapping, unchanged (a healthy motor can still be 100 %).
+    active condition (fault verdict OR stage >= 2):
+        floor + (ceiling - floor) * base/100  — e.g. Stage 2 with a
+        pristine z-score lands at 80 %, Stage 3 at 60 %, Stage 4 at
+        40 %; rising z pulls the score down inside the band.
+    """
+    base = motor_health_percent(zscore_max)
+    fault_active = (
+        predicted_class is not None and str(predicted_class) != "HEALTHY"
+    )
+    if not fault_active and stage < 2:
+        return base
+    band_stage = min(4, max(1, int(stage)))
+    floor, ceiling = FAULT_STAGE_HEALTH_BANDS[band_stage]
+    return round(floor + (ceiling - floor) * (base / 100.0), 1)
+
+
+def plant_health_index_from_scores(scores: list[float]) -> float | None:
+    """Plant index as the mean of already-assessed per-motor scores
+    (executive view: each motor scored with its stage/verdict context)."""
+    if not scores:
+        return None
+    return round(sum(scores) / len(scores), 1)
+
+
+# ----------------------------------------------------------------------
 # Financial model (Section 6.a)
 # ----------------------------------------------------------------------
 def financial_risk_exposure_etb(

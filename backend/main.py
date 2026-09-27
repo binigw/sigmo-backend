@@ -94,7 +94,10 @@ from .api.schemas import (
 from .ai import client as ai_client
 from .ai.client import AIExplanationError, AIProviderNotConfigured
 from .analysis.repair_protocols_am import AMHARIC_PROTOCOLS
-from .analysis.staging import motor_health_percent
+from .analysis.staging import (
+    assessed_health_percent,
+    classify_stage,
+)
 from .ai.client import AIExplanationError, AIProviderNotConfigured
 from .config import API
 from .db.repository import SigmoRepository
@@ -121,6 +124,18 @@ async def lifespan(app: FastAPI):
         await repository.apply_schema(SCHEMA_PATH.read_text(encoding="utf-8"))
         service.database_connected = True
         logger.info("Connected to Supabase PostgreSQL; schema verified.")
+        try:
+            reconciled = await service.reconcile_fault_episodes()
+            if reconciled:
+                logger.info(
+                    "Fault-episode reconciliation opened %d active "
+                    "episode(s) that predated the ingestion-path write.",
+                    reconciled,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Fault-episode reconciliation skipped: %s", exc
+            )
     except Exception as exc:
         # Section 9: never refuse to start because the grid/network is down.
         service.database_connected = False
@@ -428,6 +443,24 @@ async def ai_explain(request: AIExplainRequest) -> AIExplainResponse:
     fa = assessment.fault_assessment
     snap = assessment.snapshot
     predicted = fa.dominant_fault if fa is not None else None
+    # Same scoring rule as the overview / executive surfaces: the
+    # operator health score carries the stage/verdict penalty, so the
+    # LLM never sees "100% health" next to a Stage 2 fault verdict.
+    ai_stage = classify_stage(
+        zscore_max=(
+            float(snap.zscore_max) if snap is not None else 0.0
+        ),
+        gating_status=(
+            str(snap.status) if snap is not None else "HEALTHY"
+        ),
+        predicted_class=(
+            str(predicted) if predicted is not None else None
+        ),
+        rul_days_numeric=None,
+        rul_status=(
+            assessment.rul.rul_status if assessment.rul else None
+        ),
+    )
     context: dict[str, object] = {
         "motor": {
             "motor_id": motor_id,
@@ -452,7 +485,13 @@ async def ai_explain(request: AIExplainRequest) -> AIExplainResponse:
                     "crest_factor_max": snap.crest_factor_max,
                     "rotor_sideband_db_max": snap.rotor_sideband_db_max,
                     "zscore_max_sigma": snap.zscore_max,
-                    "health_percent": motor_health_percent(snap.zscore_max),
+                    "health_percent": assessed_health_percent(
+                        float(snap.zscore_max),
+                        stage=ai_stage.stage,
+                        predicted_class=predicted,
+                    ),
+                    "stage": ai_stage.stage,
+                    "stage_label": ai_stage.label,
                 }
                 if snap is not None
                 else {}

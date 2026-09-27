@@ -38,7 +38,9 @@ from ..analysis.staging import (
     executive_decision_directive,
     financial_risk_exposure_etb,
     plant_health_index,
+    plant_health_index_from_scores,
     motor_health_percent,
+    assessed_health_percent,
 )
 from ..config import DSP
 from ..db.repository import SigmoRepository
@@ -348,9 +350,11 @@ class IngestionService:
     ) -> None:
         """Persist one fault episode row (Section 10 permanent retention).
 
-        Episode trigger: the window's gate status is ANOMALY (objective
-        DSP evidence) and the classifier verdict names a fault — the
-        multi-signal principle of Section 11.6. Episode dedup: the
+        Episode trigger: a non-HEALTHY classifier verdict on a
+        steady-state window (gate evidence — including a HEALTHY gate —
+        is recorded verbatim in the Section 11.6 signals, and
+        four_signal_confirmed stays the anti-false-positive gate).
+        Episode dedup: the
         newest existing row of this motor is probed first — an ONGOING
         episode (same taxonomy code, unresolved) never duplicates; only
         a NEW episode (different code, or first ever) is written. The row records the four Section 11.6
@@ -561,14 +565,16 @@ class IngestionService:
                 crest_factor_max=analysis.crest_factor_max,
             )
             # Fault episode audit trail (Section 10): one row per NEW
-            # fault episode — anomalous gate (DSP z-score / absolute
-            # threshold evidence) PLUS a non-HEALTHY classifier verdict.
-            # A lone classifier verdict never creates audit rows
-            # (Section 11.6 multi-signal principle). Fail-soft.
-            if (
-                analysis.dominant_fault not in (None, "HEALTHY")
-                and gating.status == "ANOMALY"
-            ):
+            # fault episode — any non-HEALTHY classifier verdict opens
+            # the episode. Mechanical faults (bearing outer race, rotor
+            # bars) do NOT breach the electrical gates, so requiring
+            # gate ANOMALY here left real Stage 2 detections invisible
+            # in Fault Logs while the dashboard alerted on them. The
+            # Section 11.6 multi-signal evidence is still recorded
+            # verbatim on every row, and four_signal_confirmed (the
+            # anti-false-positive gate) still requires ALL four signals
+            # — an unconfirmed episode is visible but honestly flagged.
+            if analysis.dominant_fault not in (None, "HEALTHY"):
                 await self._log_fault_episode(
                     frame.motor_id, features, gating, verdict
                 )
@@ -878,9 +884,21 @@ class IngestionService:
                     rul_status=None,
                 )
 
-        # plant_health_index
-        zscores = [float(st["zscore_max"]) for st in states.values()]
-        phi = plant_health_index(zscores)
+        # plant_health_index — mean of per-motor OPERATOR scores: each
+        # motor is scored with its stage/verdict context, so an active
+        # Stage 2+ fault pulls the plant index down exactly as it pulls
+        # the Machine Status Grid and Decision Engine down (one scoring
+        # rule everywhere; the RUL engine keeps the pure z-anchored
+        # series by design).
+        motor_scores = [
+            assessed_health_percent(
+                float(st["zscore_max"]),
+                stage=stage_by_motor[mid].stage,
+                predicted_class=st["predicted_class"],
+            )
+            for mid, st in states.items()
+        ]
+        phi = plant_health_index_from_scores(motor_scores)
         phi_note = (
             None if phi is not None
             else "No motor telemetry yet — the plant index needs at "
@@ -1131,8 +1149,10 @@ class IngestionService:
                         if state.get("model_confidence") is not None
                         else None
                     ),
-                    health_percent=motor_health_percent(
-                        float(state["zscore_max"])
+                    health_percent=assessed_health_percent(
+                        float(state["zscore_max"]),
+                        stage=stage.stage,
+                        predicted_class=predicted,
                     ),
                     stage=stage.stage,
                     stage_label=stage.label,
@@ -1187,11 +1207,26 @@ class IngestionService:
             zscore_max = float(row["zscore_max"])
             confidence = row.get("model_confidence")
             predicted = row.get("predicted_class")
+            row_stage = classify_stage(
+                zscore_max=zscore_max,
+                gating_status=str(row["status"]),
+                predicted_class=(
+                    str(predicted) if predicted is not None else None
+                ),
+                rul_days_numeric=None,
+                rul_status=None,
+            )
             points.append(
                 TrendPoint(
                     recorded_at=row["recorded_at"],
                     status=str(row["status"]),
-                    health_percent=motor_health_percent(zscore_max),
+                    health_percent=assessed_health_percent(
+                        zscore_max,
+                        stage=row_stage.stage,
+                        predicted_class=(
+                            str(predicted) if predicted is not None else None
+                        ),
+                    ),
                     zscore_max=zscore_max,
                     thd_percent_max=max(
                         float(row["thd_percent_a"]),
@@ -1231,6 +1266,125 @@ class IngestionService:
             ),
             points=points,
         )
+
+    async def reconcile_fault_episodes(self) -> int:
+        """Open an episode row for every CURRENTLY-ACTIVE fault
+        condition that predates the ingestion-path write (deploy
+        bootstrap — e.g. a Stage 2 bearing fault detected while the old
+        trigger required a gate ANOMALY that mechanical faults never
+        produce).
+
+        Honest by construction: the condition exists NOW (live verdict
+        or freshest persisted row), the evidence columns come from that
+        same measured window, and ``spectral_evidence.detected_via``
+        records the reconciliation provenance. Idempotent per episode:
+        the newest existing row is probed first, exactly like the
+        ingestion path. Fail-soft; returns rows written.
+        """
+        written = 0
+        try:
+            overview = await self.motors_overview()
+        except Exception as exc:
+            logger.warning(
+                "Fault-episode reconciliation skipped (overview read "
+                "failed): %s", exc,
+            )
+            return 0
+        for entry in overview.motors:
+            if not entry.is_fault or entry.stage < 2:
+                continue
+            predicted = entry.predicted_class
+            if not predicted or str(predicted) == "HEALTHY":
+                continue
+            motor_id = entry.motor_id
+            try:
+                taxonomy_code = exact_taxonomy_code(entry.stage, predicted)
+                latest = await self._repo.get_latest_fault_episode(
+                    motor_id
+                )
+                if latest is not None and latest["taxonomy_code"] == (
+                    taxonomy_code
+                ):
+                    continue  # ongoing episode already on record
+                snap = None
+                try:
+                    snap = await self._repo.fetch_latest_snapshot(motor_id)
+                except Exception:
+                    snap = None
+                if snap is not None:
+                    zscore = float(snap.get("zscore_max") or 0.0)
+                    status = str(snap.get("status") or entry.status)
+                    evidence = {
+                        "fundamental_hz": snap.get("fundamental_hz"),
+                        "thd_percent_max": max(
+                            float(snap[k])
+                            for k in (
+                                "thd_percent_a", "thd_percent_b",
+                                "thd_percent_c",
+                            )
+                        ),
+                        "current_unbalance_percent": float(
+                            snap.get("unbalance_percent") or 0.0
+                        ),
+                        "crest_factor_max": max(
+                            float(snap[k])
+                            for k in (
+                                "crest_factor_a", "crest_factor_b",
+                                "crest_factor_c",
+                            )
+                        ),
+                        "rotor_sideband_db_max": max(
+                            float(snap[k])
+                            for k in (
+                                "rotor_sideband_db_a",
+                                "rotor_sideband_db_b",
+                                "rotor_sideband_db_c",
+                            )
+                        ),
+                        "envelope_peak_hz": [
+                            snap.get("envelope_peak_hz_a"),
+                            snap.get("envelope_peak_hz_b"),
+                            snap.get("envelope_peak_hz_c"),
+                        ],
+                        "zscore_max": zscore,
+                        "model_version": self.model_version,
+                    }
+                else:  # live-only motor (DB outage window): overview data
+                    zscore = 0.0
+                    status = entry.status
+                    evidence = {
+                        "fundamental_hz": entry.fundamental_hz,
+                        "thd_percent_max": entry.thd_percent_max,
+                        "current_unbalance_percent": (
+                            entry.unbalance_percent
+                        ),
+                        "zscore_unavailable": True,
+                        "model_version": self.model_version,
+                    }
+                evidence["detected_via"] = "startup_reconciliation"
+                await self._repo.log_fault(
+                    motor_id=motor_id,
+                    taxonomy_code=taxonomy_code,
+                    urgency_stage=entry.stage,
+                    model_confidence=(
+                        float(entry.model_confidence or 0.0)
+                    ),
+                    population_sigma=zscore,
+                    absolute_threshold_breached=(status == "ANOMALY"),
+                    trend_confirmed=False,
+                    spectral_evidence=evidence,
+                )
+                written += 1
+                logger.info(
+                    "Fault episode reconciled motor=%s code=%s stage=%d",
+                    motor_id, taxonomy_code, entry.stage,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Fault-episode reconciliation failed for %s: %s",
+                    motor_id, exc,
+                )
+        return written
 
     async def fault_logs(
         self, motor_id: str | None, limit: int

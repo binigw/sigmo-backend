@@ -10,7 +10,10 @@ Test matrix:
       spectral evidence keys, model version
   F2: episode dedup — a second window of the SAME ongoing episode
       never duplicates the row
-  F3: healthy motors never produce fault rows
+  F3: gate-HEALTHY fault verdict still logs an episode — with
+      absolute_threshold_breached / four_signal_confirmed honestly
+      False (unconfirmed); mechanical faults never breach the
+      electrical gates
   F4: GET /api/v2/faults — shape, newest-first ordering, motor filter,
       honest returned accounting
   F5: auth matrix — no key 401, device scope 403, dashboard reads
@@ -114,12 +117,28 @@ async def run() -> None:
             f"rows={len(flog_rows)}",
         )
 
-        # ---- F3: healthy motor -> no fault rows ---------------------
+        # ---- F3: gate-HEALTHY fault verdict logs an UNCONFIRMED row --
+        # The field scenario behind the sync fix: mechanical faults
+        # (bearing, rotor) do NOT breach the electrical gates, so the
+        # classifier verdict arrives with gate status HEALTHY. The
+        # episode must STILL be written (it is a real detection) while
+        # the Section 11.6 signals record the missing gate evidence
+        # honestly: absolute_threshold_breached False and
+        # four_signal_confirmed False (unconfirmed episode).
         await harness.send_window(admin, "MTR-FLOG-OK", healthy)
+        ok_rows = [
+            r for r in repo.fault_rows if r["motor_id"] == "MTR-FLOG-OK"
+        ]
+        f3_row = ok_rows[0] if ok_rows else {}
         check(
-            "F3 healthy motor never logs a fault episode",
-            not [r for r in repo.fault_rows if r["motor_id"] == "MTR-FLOG-OK"],
-            f"rows={len(repo.fault_rows)}",
+            "F3 gate-HEALTHY fault verdict logs an UNCONFIRMED episode",
+            len(ok_rows) == 1
+            and f3_row.get("absolute_threshold_breached") is False
+            and f3_row.get("four_signal_confirmed") is False
+            and bool(TAXONOMY_RE.match(f3_row.get("taxonomy_code", ""))),
+            f"rows={len(ok_rows)}, abs="
+            f"{f3_row.get('absolute_threshold_breached')}, code="
+            f"{f3_row.get('taxonomy_code')}",
         )
 
         # ---- F4: read endpoint shape + filter ------------------------
@@ -146,13 +165,24 @@ async def run() -> None:
             "/api/v2/faults?motor_id=MTR-FLOG-OK"
         )
         m_f = r_f.json()
+        # Filtering by a motor with telemetry but NO fault detection
+        # (MTR-FLOG-NEVER never gets a faulty window) returns an honest
+        # empty list. (MTR-FLOG-OK now legitimately carries the F3
+        # gate-HEALTHY episode.)
+        r_never = await client.get(
+            "/api/v2/faults?motor_id=MTR-FLOG-NEVER"
+        )
+        m_n = r_never.json()
         check(
-            "F4b motor filter (other motor -> empty, honest)",
+            "F4b motor filter (fault-free motor -> empty, honest)",
             r_f.status_code == 200
             and m_f["motor_id"] == "MTR-FLOG-OK"
-            and m_f["returned"] == 0
-            and m_f["faults"] == [],
-            f"returned={m_f.get('returned')}",
+            and m_f["returned"] == len(m_f["faults"])
+            and r_never.status_code == 200
+            and m_n["returned"] == 0
+            and m_n["faults"] == [],
+            f"ok_returned={m_f.get('returned')}, "
+            f"never_returned={m_n.get('returned')}",
         )
 
         # ---- F5: auth matrix ------------------------------------------
