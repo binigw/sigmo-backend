@@ -473,6 +473,73 @@ class FaultLogsPayload(BaseModel):
     faults: list[FaultLogEntry]
 
 
+class AlertEntry(BaseModel):
+    """One live plant alert, derived on read from a motor's condition.
+
+    Alerts are never stored: an alert exists while a motor's newest
+    window shows Stage >= 2 or an active fault verdict. A dismissal
+    hides an alert while its condition persists and is auto-forgotten
+    once the condition clears. The audit trail lives separately and
+    immutably in fault_logs (Section 10).
+    """
+
+    alert_id: str = Field(
+        description="Stable id '{motor_id}:{alert_key}' for dismiss/restore."
+    )
+    motor_id: str
+    alert_key: str = Field(
+        description="Condition signature: taxonomy verdict or STAGE_<n>."
+    )
+    severity: Literal["critical", "high", "medium"]
+    predicted_class: str | None = None
+    stage: int
+    stage_label: str
+    is_fault: bool
+    status: str = Field(description="Gating status of the newest window.")
+    model_confidence: float | None = None
+    health_percent: float | None = None
+    thd_percent_max: float | None = None
+    unbalance_percent: float | None = None
+    recorded_at: datetime
+    source: str = Field(description="'live_runtime' or 'supabase'.")
+    dismissed: bool = False
+    dismissed_at: datetime | None = None
+
+
+class AlertsPayload(BaseModel):
+    """GET /api/v2/alerts — the operator's live alert inbox."""
+
+    generated_at: datetime
+    database_connected: bool
+    total_active: int
+    alerts: list[AlertEntry] = Field(
+        description="Active alerts first; dismissed ones (only with "
+        "include_dismissed=true) appended after them, flagged."
+    )
+
+
+class AlertDismissRequest(BaseModel):
+    """POST /api/v2/alerts/dismiss | restore — bulk body."""
+
+    alert_ids: list[str] = Field(
+        min_length=1, max_length=100,
+        description="Alert ids as returned by GET /api/v2/alerts.",
+    )
+
+
+class AlertDismissalResult(BaseModel):
+    """Per-item honest outcome of a dismiss or restore call."""
+
+    requested: int
+    affected: int = Field(
+        description="Items dismissed or restored (idempotent repeats "
+        "count as affected)."
+    )
+    unknown: list[str] = Field(
+        description="Ids matching no currently-derived alert."
+    )
+
+
 class AIExplainRequest(BaseModel):
     """POST /api/v2/ai/explain — request a real-LLM technician analysis."""
 

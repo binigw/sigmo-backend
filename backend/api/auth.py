@@ -3,8 +3,10 @@
 Three scopes, one header (``X-API-Key``):
 
   device     ESP32 nodes: POST /api/v2/telemetry only.
-  dashboard  Read surface for the Replit frontend / mobile clients:
-             GET /api/v2/motors/* and GET /api/v2/views/*.
+  dashboard  Read + alert-management surface for the dashboard /
+             mobile clients: GET /api/v2/motors/*, GET /api/v2/views/*,
+             GET /api/v2/faults and the GET/POST/DELETE /api/v2/alerts
+             operator inbox (dismiss/restore).
   admin      Commissioning & maintenance: everything above plus
              /api/v2/admin/* and /api/v2/maintenance/*.
 
@@ -49,6 +51,8 @@ PROTECTED: tuple[tuple[str, tuple[str, ...], frozenset[str]], ...] = (
     ("/api/v2/telemetry", ("POST",), frozenset({"device", "admin"})),
     ("/api/v2/motors", ("GET",), frozenset({"dashboard", "admin"})),
     ("/api/v2/faults", ("GET",), frozenset({"dashboard", "admin"})),
+    ("/api/v2/alerts", ("GET", "POST", "DELETE"),
+     frozenset({"dashboard", "admin"})),
     ("/api/v2/ai", ("POST",), frozenset({"dashboard", "admin"})),
     ("/api/v2/views", ("GET",), frozenset({"dashboard", "admin"})),
     ("/api/v2/admin", ("GET", "PUT", "POST", "DELETE"),

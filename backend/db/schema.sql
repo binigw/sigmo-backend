@@ -153,6 +153,23 @@ CREATE TABLE IF NOT EXISTS fault_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_fault_logs_motor ON fault_logs (motor_id, detected_at DESC);
 
+-- Operator alert dismissals — live alert hygiene for the dashboard
+-- (the mutable sibling of the immutable fault_logs above). Alerts are
+-- DERIVED on read (stage >= 2 or an active fault verdict) and never
+-- stored; a dismissal hides one live alert while its condition
+-- persists and is auto-forgotten once that condition clears, so a
+-- re-triggering or escalating fault alerts again.
+CREATE TABLE IF NOT EXISTS alert_dismissals (
+    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    motor_id            TEXT        NOT NULL,
+    alert_key           TEXT        NOT NULL,
+    dismissed_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    dismissed_by        TEXT        NOT NULL DEFAULT 'dashboard',
+    UNIQUE (motor_id, alert_key)
+);
+CREATE INDEX IF NOT EXISTS idx_alert_dismissals_motor
+    ON alert_dismissals (motor_id, dismissed_at DESC);
+
 -- 90-day retention for routine HEALTHY telemetry only. Baselines and
 -- fault logs are never touched by this routine (Section 10).
 CREATE OR REPLACE FUNCTION cleanup_healthy_telemetry() RETURNS INTEGER AS $$

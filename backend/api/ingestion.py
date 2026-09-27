@@ -46,6 +46,8 @@ from ..dsp.pipeline import ThreePhaseFeatures, analyze_three_phase
 from ..ml.features import extract_window_features
 from ..ml.inference import ModelRuntime
 from .schemas import (
+    AlertEntry,
+    AlertsPayload,
     CriticalAssetRiskSummary,
     ExecutiveViewPayload,
     FaultAssessment,
@@ -1273,6 +1275,153 @@ class IngestionService:
             returned=len(entries),
             faults=entries,
         )
+
+    # ------------------------------------------------------------------
+    # Live alerts (derived on read) + operator dismissals
+    # ------------------------------------------------------------------
+
+    def _derive_alerts(
+        self, overview: MotorsOverviewPayload
+    ) -> list[AlertEntry]:
+        """Derive the live alert list from a motors overview snapshot.
+
+        Alert rule (the same condition the dashboard badge uses):
+        Stage >= 2 or an active fault verdict. The alert_key is the
+        condition signature — the taxonomy verdict for faults,
+        otherwise STAGE_<n> — so a stage escalation or a different
+        fault re-alerts and a dismissal never outlives its condition.
+        """
+        entries: list[AlertEntry] = []
+        for m in overview.motors:
+            if not (m.stage >= 2 or m.is_fault):
+                continue
+            if m.is_fault and m.predicted_class:
+                alert_key = str(m.predicted_class)
+            else:
+                alert_key = f"STAGE_{m.stage}"
+            severity = (
+                "critical"
+                if m.stage >= 3
+                else "high" if m.stage == 2 else "medium"
+            )
+            entries.append(
+                AlertEntry(
+                    alert_id=f"{m.motor_id}:{alert_key}",
+                    motor_id=m.motor_id,
+                    alert_key=alert_key,
+                    severity=severity,
+                    predicted_class=m.predicted_class,
+                    stage=m.stage,
+                    stage_label=m.stage_label,
+                    is_fault=m.is_fault,
+                    status=m.status,
+                    model_confidence=m.model_confidence,
+                    health_percent=m.health_percent,
+                    thd_percent_max=m.thd_percent_max,
+                    unbalance_percent=m.unbalance_percent,
+                    recorded_at=m.recorded_at,
+                    source=m.source,
+                )
+            )
+        return entries
+
+    async def alerts(self, include_dismissed: bool = False) -> AlertsPayload:
+        """Live plant alerts minus dismissals (GET /api/v2/alerts).
+
+        Dismissals auto-expire: any stored dismissal whose condition is
+        no longer derived (fault cleared / stage normalised) is deleted
+        on read, so a re-triggering fault alerts again. Fault episodes
+        stay immutable in fault_logs (Section 10) — alerts are the
+        operator's live inbox, not an audit trail.
+        """
+        overview = await self.motors_overview()
+        derived = self._derive_alerts(overview)
+        dismissed_at: dict[tuple[str, str], object] = {}
+        try:
+            rows = await self._repo.fetch_alert_dismissals()
+            derived_pairs = {(a.motor_id, a.alert_key) for a in derived}
+            stale: list[tuple[str, str]] = []
+            for row in rows:
+                pair = (str(row["motor_id"]), str(row["alert_key"]))
+                if pair in derived_pairs:
+                    dismissed_at[pair] = row["dismissed_at"]
+                else:
+                    stale.append(pair)
+            if stale:
+                await self._repo.delete_alert_dismissals(stale)
+        except Exception as exc:
+            logger.warning(
+                "Alert dismissal store unavailable (fail-soft: every "
+                "derived alert is shown active): %s", exc,
+            )
+        active = [
+            a
+            for a in derived
+            if (a.motor_id, a.alert_key) not in dismissed_at
+        ]
+        alerts_out = active
+        if include_dismissed:
+            flagged = []
+            for a in derived:
+                stamp = dismissed_at.get((a.motor_id, a.alert_key))
+                if stamp is not None:
+                    flagged.append(
+                        a.model_copy(
+                            update={"dismissed": True, "dismissed_at": stamp}
+                        )
+                    )
+            alerts_out = active + flagged
+        return AlertsPayload(
+            generated_at=overview.generated_at,
+            database_connected=overview.database_connected,
+            total_active=len(active),
+            alerts=alerts_out,
+        )
+
+    async def _alert_pairs_for_ids(
+        self, alert_ids: list[str]
+    ) -> tuple[list[tuple[str, str]], list[str]]:
+        """Map alert ids to (motor_id, alert_key) pairs against the
+        CURRENT derivation. Unknown ids are reported, never guessed."""
+        overview = await self.motors_overview()
+        by_id = {
+            a.alert_id: (a.motor_id, a.alert_key)
+            for a in self._derive_alerts(overview)
+        }
+        pairs: list[tuple[str, str]] = []
+        unknown: list[str] = []
+        for alert_id in alert_ids:
+            pair = by_id.get(alert_id)
+            if pair is None:
+                unknown.append(alert_id)
+            else:
+                pairs.append(pair)
+        return pairs, unknown
+
+    async def dismiss_alerts(
+        self, alert_ids: list[str], dismissed_by: str = "dashboard"
+    ) -> tuple[int, list[str]]:
+        """Dismiss live alerts (single DELETE + bulk POST).
+
+        Returns (affected_count, unknown_ids). Raises when the
+        persistence store is unreachable — the caller answers 503.
+        """
+        pairs, unknown = await self._alert_pairs_for_ids(alert_ids)
+        if pairs:
+            await self._repo.upsert_alert_dismissals(pairs, dismissed_by)
+        return len(pairs), unknown
+
+    async def restore_alerts(
+        self, alert_ids: list[str]
+    ) -> tuple[int, list[str]]:
+        """Restore previously dismissed alerts (POST .../restore).
+
+        Idempotent: restoring a visible alert is a no-op success.
+        """
+        pairs, unknown = await self._alert_pairs_for_ids(alert_ids)
+        if pairs:
+            await self._repo.delete_alert_dismissals(pairs)
+        return len(pairs), unknown
 
     async def technician_view(self, motor_id: str) -> TechnicianViewPayload:
         """Section 6.b — the complete Technician payload for one motor."""

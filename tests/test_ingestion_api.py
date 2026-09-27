@@ -310,6 +310,48 @@ class CaptureRepository(SigmoRepository):
         # four_signal_confirmed generated column.
         self.fault_rows: list[dict] = []
         self._fault_seq = 0
+        # Alert dismissals (live alert hygiene): mirrors the
+        # alert_dismissals wire in memory.
+        self.alert_dismissal_rows: list[dict] = []
+
+    async def fetch_alert_dismissals(self) -> list[dict]:
+        if self.outage:
+            raise ConnectionError("simulated Supabase outage")
+        return [dict(r) for r in self.alert_dismissal_rows]
+
+    async def upsert_alert_dismissals(self, pairs, dismissed_by: str) -> None:
+        if self.outage:
+            raise ConnectionError("simulated Supabase outage")
+        now = datetime.now(timezone.utc)
+        for mid, key in pairs:
+            for row in self.alert_dismissal_rows:
+                if row["motor_id"] == mid and row["alert_key"] == key:
+                    row["dismissed_at"] = now
+                    row["dismissed_by"] = dismissed_by
+                    break
+            else:
+                self.alert_dismissal_rows.append(
+                    {
+                        "motor_id": mid,
+                        "alert_key": key,
+                        "dismissed_at": now,
+                        "dismissed_by": dismissed_by,
+                    }
+                )
+
+    async def delete_alert_dismissals(self, pairs) -> int:
+        if self.outage:
+            raise ConnectionError("simulated Supabase outage")
+        removed = 0
+        for mid, key in pairs:
+            before = len(self.alert_dismissal_rows)
+            self.alert_dismissal_rows = [
+                r
+                for r in self.alert_dismissal_rows
+                if not (r["motor_id"] == mid and r["alert_key"] == key)
+            ]
+            removed += before - len(self.alert_dismissal_rows)
+        return removed
 
     async def upsert_motor_asset(self, asset: dict) -> bool:
         if self.outage:

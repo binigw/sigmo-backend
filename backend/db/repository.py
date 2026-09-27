@@ -551,6 +551,66 @@ class SigmoRepository:
         return out
 
     # ------------------------------------------------------------------
+    # Operator alert dismissals (live alert hygiene, see schema.sql)
+    # ------------------------------------------------------------------
+
+    async def fetch_alert_dismissals(self) -> list[dict[str, Any]]:
+        """Every stored dismissal: motor_id, alert_key, dismissed_at."""
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT motor_id, alert_key, dismissed_at, dismissed_by
+                FROM alert_dismissals
+                """
+            )
+        return [dict(r) for r in rows]
+
+    async def upsert_alert_dismissals(
+        self, pairs: list[tuple[str, str]], dismissed_by: str
+    ) -> None:
+        """Store (or refresh) one dismissal per (motor_id, alert_key)."""
+        if not pairs:
+            return
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO alert_dismissals
+                    (motor_id, alert_key, dismissed_by)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (motor_id, alert_key)
+                DO UPDATE SET dismissed_at = now(),
+                              dismissed_by = EXCLUDED.dismissed_by
+                """,
+                [(mid, key, dismissed_by) for mid, key in pairs],
+            )
+
+    async def delete_alert_dismissals(
+        self, pairs: list[tuple[str, str]]
+    ) -> int:
+        """Remove dismissals (restore / auto-forget cleared conditions).
+
+        Returns the number of rows actually deleted.
+        """
+        if not pairs:
+            return 0
+        pool = self._require_pool()
+        deleted = 0
+        async with pool.acquire() as conn:
+            for mid, key in pairs:
+                removed = await conn.fetch(
+                    """
+                    DELETE FROM alert_dismissals
+                    WHERE motor_id = $1 AND alert_key = $2
+                    RETURNING motor_id
+                    """,
+                    mid, key,
+                )
+                deleted += len(removed)
+        return deleted
+
+    # ------------------------------------------------------------------
     # Deterministic RUL history fetch (Section 14.2)
     # ------------------------------------------------------------------
     async def fetch_health_index_history(

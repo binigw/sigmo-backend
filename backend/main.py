@@ -24,6 +24,13 @@ Endpoints:
   GET  /api/v2/faults    — fault episode history (Section 10 permanent
                            retention; Section 11.6 four-signal evidence
                            per episode, newest first)
+  GET  /api/v2/alerts    — live plant alerts (derived on read: Stage >= 2
+                           or an active fault verdict) minus operator
+                           dismissals; DELETE /api/v2/alerts/{alert_id}
+                           and POST /api/v2/alerts/dismiss|restore manage
+                           the operator inbox. Dismissals auto-expire
+                           when the condition clears; fault_logs stays
+                           immutable (Section 10).
   GET  /api/v2/models/active — ACTIVE classifier version metadata
   GET  /api/v2/views/executive
                            — Section 6.a Executive payload (one JSON:
@@ -78,6 +85,9 @@ from .api.schemas import (
     MotorsOverviewPayload,
     TrendsPayload,
     FaultLogsPayload,
+    AlertDismissRequest,
+    AlertDismissalResult,
+    AlertsPayload,
     AIExplainRequest,
     AIExplainResponse,
 )
@@ -286,6 +296,95 @@ async def faults(
         raise HTTPException(
             status_code=500, detail=f"Fault logs error: {exc}"
         ) from exc
+
+
+@app.get("/api/v2/alerts", response_model=AlertsPayload)
+async def alerts(include_dismissed: bool = False) -> AlertsPayload:
+    """Live plant alerts (GET /api/v2/alerts) — derived on read.
+
+    An alert exists while a motor's newest window shows Stage >= 2 or
+    an active fault verdict. Dismissed alerts are hidden while their
+    condition persists (dismissals auto-expire when it clears). The
+    immutable audit trail stays in fault_logs (Section 10).
+    """
+    try:
+        return await service.alerts(include_dismissed=include_dismissed)
+    except Exception as exc:
+        logger.exception("Alerts derivation failure")
+        raise HTTPException(
+            status_code=500, detail=f"Alerts error: {exc}"
+        ) from exc
+
+
+@app.delete("/api/v2/alerts/{alert_id}", response_model=AlertDismissalResult)
+async def dismiss_alert(alert_id: str) -> AlertDismissalResult:
+    """Dismiss ONE live alert (DELETE /api/v2/alerts/{alert_id}).
+
+    The alert disappears from the active list until its condition
+    clears; a re-triggering or escalating condition alerts again.
+    """
+    try:
+        affected, unknown = await service.dismiss_alerts([alert_id])
+    except Exception as exc:
+        logger.warning("Alert dismiss failure for %s: %s", alert_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Alert management is temporarily unavailable "
+            "(persistence store unreachable). Try again shortly.",
+        ) from exc
+    if not affected:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown alert id {alert_id!r} — it matches no "
+            "currently live condition.",
+        )
+    return AlertDismissalResult(
+        requested=1, affected=affected, unknown=unknown
+    )
+
+
+@app.post("/api/v2/alerts/dismiss", response_model=AlertDismissalResult)
+async def dismiss_alerts_bulk(
+    request: AlertDismissRequest,
+) -> AlertDismissalResult:
+    """Dismiss several live alerts (POST /api/v2/alerts/dismiss).
+
+    Per-item honest accounting: unknown ids are echoed, never guessed.
+    """
+    try:
+        affected, unknown = await service.dismiss_alerts(request.alert_ids)
+    except Exception as exc:
+        logger.warning("Bulk alert dismiss failure: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Alert management is temporarily unavailable "
+            "(persistence store unreachable). Try again shortly.",
+        ) from exc
+    return AlertDismissalResult(
+        requested=len(request.alert_ids), affected=affected, unknown=unknown
+    )
+
+
+@app.post("/api/v2/alerts/restore", response_model=AlertDismissalResult)
+async def restore_alerts_bulk(
+    request: AlertDismissRequest,
+) -> AlertDismissalResult:
+    """Restore previously dismissed alerts (POST /api/v2/alerts/restore).
+
+    Idempotent: restoring an already-visible alert is a no-op success.
+    """
+    try:
+        affected, unknown = await service.restore_alerts(request.alert_ids)
+    except Exception as exc:
+        logger.warning("Alert restore failure: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Alert management is temporarily unavailable "
+            "(persistence store unreachable). Try again shortly.",
+        ) from exc
+    return AlertDismissalResult(
+        requested=len(request.alert_ids), affected=affected, unknown=unknown
+    )
 
 
 @app.post("/api/v2/ai/explain", response_model=AIExplainResponse)
