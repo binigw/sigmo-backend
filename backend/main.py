@@ -638,6 +638,37 @@ async def list_motor_assets() -> list[dict]:
         ) from exc
 
 
+@app.delete("/api/v2/admin/motor-assets/{motor_id}")
+async def delete_motor_asset(motor_id: str) -> dict[str, str]:
+    """Decommissioning: remove one motor's asset record (admin surface).
+
+    Audit-safe: refuses with 409 when the motor has telemetry or fault
+    history — the Section 10 audit trail is immutable and must never
+    be orphaned. 404 for an unknown motor_id.
+    """
+    try:
+        outcome = await repository.delete_motor_asset(motor_id)
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Database unavailable: {exc}"
+        ) from exc
+    if outcome == "has_history":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Motor has telemetry or fault history — the audit "
+                "trail is immutable, so this asset cannot be deleted."
+            ),
+        )
+    if outcome == "not_found":
+        raise HTTPException(
+            status_code=404, detail=f"Unknown motor_id: {motor_id}"
+        )
+    return {"motor_id": motor_id, "status": "deleted"}
+
+
 @app.get("/api/v2/admin/plant-config")
 async def get_plant_config() -> dict[str, dict]:
     """Configured business rates (Section 6.a financial basis)."""

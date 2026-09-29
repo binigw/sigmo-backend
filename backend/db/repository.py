@@ -313,6 +313,45 @@ class SigmoRepository:
             )
         return [dict(r) for r in rows]
 
+    async def delete_motor_asset(self, motor_id: str) -> str:
+        """Decommission one motor's asset record (admin surface).
+
+        Audit-safe by design: a motor that has EVER recorded telemetry
+        or a fault episode cannot be deleted — the Section 10 fault
+        history is immutable and must never be orphaned. Derived state
+        (population baselines, alert dismissals) belongs to the asset
+        row and is removed with it. Returns one of: "deleted",
+        "has_history", "not_found".
+        """
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                telemetry = await conn.fetchval(
+                    "SELECT count(*) FROM telemetry_features WHERE motor_id = $1",
+                    motor_id,
+                )
+                if telemetry:
+                    return "has_history"
+                faults = await conn.fetchval(
+                    "SELECT count(*) FROM fault_logs WHERE motor_id = $1",
+                    motor_id,
+                )
+                if faults:
+                    return "has_history"
+                # Derived state first (FK children / UI state).
+                await conn.execute(
+                    "DELETE FROM motor_baselines WHERE motor_id = $1", motor_id
+                )
+                await conn.execute(
+                    "DELETE FROM alert_dismissals WHERE motor_id = $1", motor_id
+                )
+                status = await conn.execute(
+                    "DELETE FROM motors WHERE motor_id = $1", motor_id
+                )
+                # asyncpg returns the row count in the status string —
+                # a filtered delete is "DELETE 0", never an error.
+                return "deleted" if status == "DELETE 1" else "not_found"
+
     async def get_plant_config(self) -> dict[str, dict[str, Any]]:
         """All explicitly-configured plant business rates (Section 6.a).
 
