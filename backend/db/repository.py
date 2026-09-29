@@ -719,3 +719,51 @@ class SigmoRepository:
             current_sample=current_sample,
             window_samples=window_samples,
         )
+
+    # ------------------------------------------------------------------
+    # In-app technician invitations (public.user_roles / auth.users)
+    # ------------------------------------------------------------------
+
+    async def user_role(self, user_id: str) -> str | None:
+        """Role of an auth user in public.user_roles.
+
+        None (no row) is a legitimate state: the frontend fail-closed
+        default treats it as 'technician'. Read-only.
+        """
+        pool = self._require_pool()
+        row = await pool.fetchrow(
+            "SELECT role FROM public.user_roles WHERE user_id = $1::uuid",
+            user_id,
+        )
+        return row["role"] if row else None
+
+    async def auth_user_id_for_email(self, email: str) -> str | None:
+        """auth.users id for an email (invite-result lookup; read-only,
+        used as a fallback when the invite response carries no id)."""
+        pool = self._require_pool()
+        row = await pool.fetchrow(
+            "SELECT id::text FROM auth.users WHERE lower(email) = lower($1)",
+            email,
+        )
+        return row["id"] if row else None
+
+    async def assign_role_if_absent(self, user_id: str, role: str) -> str:
+        """Insert the user's role row unless one exists already.
+
+        INSERT .. ON CONFLICT DO NOTHING — an existing role (e.g. a
+        pre-provisioned admin) is NEVER overwritten. Returns the
+        effective role afterwards.
+        """
+        pool = self._require_pool()
+        await pool.execute(
+            "INSERT INTO public.user_roles (user_id, role, created_at, updated_at) "
+            "VALUES ($1::uuid, $2, now(), now()) "
+            "ON CONFLICT (user_id) DO NOTHING",
+            user_id,
+            role,
+        )
+        row = await pool.fetchrow(
+            "SELECT role FROM public.user_roles WHERE user_id = $1::uuid",
+            user_id,
+        )
+        return row["role"] if row else role

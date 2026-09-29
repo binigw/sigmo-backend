@@ -551,6 +551,16 @@ class AIExplainRequest(BaseModel):
     motor_id: str = Field(min_length=1, max_length=64)
 
 
+class InviteTechnicianRequest(BaseModel):
+    """POST /api/v2/invitations — the admin invite modal payload.
+
+    Email-only by design: the technician sets their own password from
+    the Supabase invitation email; nothing else is collected here.
+    """
+
+    email: str = Field(min_length=3, max_length=254)
+
+
 class AIExplainResponse(BaseModel):
     """POST /api/v2/ai/explain — bilingual (Amharic + English) result.
 

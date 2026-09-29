@@ -54,6 +54,10 @@ class DatabaseConfig:
 
     dsn: str = field(default_factory=lambda: os.environ.get("DATABASE_URL", ""))
     supabase_url: str = field(default_factory=lambda: os.environ.get("SUPABASE_URL", ""))
+    # Server-side ONLY (in-app admin invites): never exposed to browsers.
+    supabase_service_role_key: str = field(default_factory=lambda: (
+        os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    ))
     min_pool_size: int = 1
     max_pool_size: int = 5
     healthy_log_interval_s: int = 1800           # 15-30 min healthy cadence

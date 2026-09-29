@@ -10,6 +10,13 @@ Three scopes, one header (``X-API-Key``):
   admin      Commissioning & maintenance: everything above plus
              /api/v2/admin/* and /api/v2/maintenance/*.
 
+  /api/v2/invitations (POST) admits dashboard/admin keys at THIS layer
+  only; the handler then requires the caller's own Supabase session
+  (Bearer token, introspected server-side) AND user_roles.role='admin'.
+  This is how the browser (which only ever holds the dashboard key)
+  can trigger admin-gated user management without the admin API key
+  ever shipping to the client.
+
 Keys live ONLY in the ``SIGMO_API_KEYS`` environment variable (Render
 Secrets), as a comma-separated list of ``key:scope`` pairs —
 credentials never touch the database or any file.
@@ -55,6 +62,11 @@ PROTECTED: tuple[tuple[str, tuple[str, ...], frozenset[str]], ...] = (
      frozenset({"dashboard", "admin"})),
     ("/api/v2/ai", ("POST",), frozenset({"dashboard", "admin"})),
     ("/api/v2/views", ("GET",), frozenset({"dashboard", "admin"})),
+    # In-app technician invites: the API-key layer admits dashboard/admin
+    # scope, but the handler itself additionally requires the signed-in
+    # user's Supabase session + DB role 'admin' (see backend/api/
+    # invitations.py) — the admin API key never ships to the browser.
+    ("/api/v2/invitations", ("POST",), frozenset({"dashboard", "admin"})),
     ("/api/v2/admin", ("GET", "PUT", "POST", "DELETE"),
      frozenset({"admin"})),
     ("/api/v2/maintenance", ("POST",), frozenset({"admin"})),

@@ -50,6 +50,13 @@ Endpoints:
   PUT  /api/v2/admin/plant-config/{key} — set one business rate
   POST /api/v2/maintenance/retention-cleanup
                            — triggers the 90-day healthy-telemetry cleanup
+  POST /api/v2/invitations — in-app admin invite: sends a Supabase
+                           invitation email so the technician sets their
+                           own password; assigns the default Technician
+                           role. Requires the caller's Supabase session
+                           (Bearer, introspected server-side) AND DB
+                           role 'admin' — the admin API key never ships
+                           to the browser (see backend/api/invitations.py)
 
 CORS: configured for the external Replit Agent frontend (Phase 4).
 Origins are env-driven via CORS_ALLOW_ORIGINS (comma-separated,
@@ -73,10 +80,12 @@ from fastapi.responses import JSONResponse
 
 from .api.auth import enforce_api_key, load_keys
 from .api.ingestion import IngestionService
+from .api import invitations as invitations_api
 from .api.schemas import (
     ExecutiveViewPayload,
     FrameAck,
     HealthResponse,
+    InviteTechnicianRequest,
     MotorAssetRegistration,
     MotorAssessment,
     PlantConfigEntry,
@@ -707,3 +716,63 @@ async def retention_cleanup() -> dict[str, int]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Database unavailable: {exc}") from exc
     return {"rows_removed": removed}
+
+
+@app.post("/api/v2/invitations")
+async def invite_technician(
+    invite: InviteTechnicianRequest, request: Request
+) -> dict:
+    """In-app technician invitation (admin-gated; see backend/api/
+    invitations.py). Sends the Supabase invite email server-side and
+    assigns the fail-closed default Technician role. The service-role
+    key never leaves this process.
+    """
+    try:
+        email = invitations_api.normalize_email(invite.email)
+        invitations_api.ensure_configured()
+        bearer = request.headers.get("Authorization", "")
+        token = bearer[7:].strip() if bearer.startswith("Bearer ") else ""
+        if not token:
+            raise invitations_api.MissingSession(
+                "Missing session token — sign in again."
+            )
+        caller = await invitations_api.introspect_token(token)
+        caller_id = str(caller["id"])
+        if await repository.user_role(caller_id) != "admin":
+            raise invitations_api.NotAdmin(
+                "Only administrators can invite users."
+            )
+        # Pre-check: an existing UNCONFIRMED user means Supabase will
+        # re-send their invitation (200) — surfaced honestly as "resent".
+        # A CONFIRMED user never reaches here (Supabase 409s first).
+        preexisting_id = await repository.auth_user_id_for_email(email)
+        result = await invitations_api.send_invite(email)
+        user_id = result.get("id") or preexisting_id or (
+            await repository.auth_user_id_for_email(email)
+        )
+        effective_role = None
+        if user_id:
+            effective_role = await repository.assign_role_if_absent(
+                str(user_id), invitations_api.DEFAULT_ROLE
+            )
+        logger.info(
+            "Invitation sent: email=%s by admin=%s role=%s",
+            email, caller.get("email", caller_id), effective_role,
+        )
+        return {
+            "status": "resent" if preexisting_id else "invited",
+            "email": email,
+            "user_id": user_id,
+            "role": effective_role or invitations_api.DEFAULT_ROLE,
+        }
+    except invitations_api.InviteError as exc:
+        raise HTTPException(
+            status_code=exc.status,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    except Exception as exc:
+        logger.exception("Invitation failure")
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "internal_error", "message": f"Invitation error: {exc}"},
+        ) from exc
