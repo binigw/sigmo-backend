@@ -267,6 +267,14 @@ class IngestionService:
         model_version = (
             str(verdict["model_version"]) if verdict is not None else None
         )
+        # Section 10 escalation: 1-minute logging whenever an early
+        # Stage 2+ anomaly is detected — the novelty gate tripping
+        # (status ANOMALY) OR a non-HEALTHY v6c classifier verdict,
+        # whichever fires first. The persisted status column keeps the
+        # honest gate status; only the cadence uses this escalation.
+        cadence_status = gating.status
+        if verdict is not None and str(verdict.get("predicted_class")) != "HEALTHY":
+            cadence_status = "ANOMALY"
         try:
             await self._flush_offline_buffer()
             written = await self._repo.log_telemetry(
@@ -274,6 +282,7 @@ class IngestionService:
                 predicted_class=predicted_class,
                 model_confidence=model_confidence,
                 model_version=model_version,
+                cadence_status=cadence_status,
             )
             self.database_connected = True
             return written, False

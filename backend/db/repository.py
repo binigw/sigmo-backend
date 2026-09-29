@@ -65,12 +65,21 @@ class SigmoRepository:
     # ------------------------------------------------------------------
     # Adaptive-cadence telemetry logging (Section 10)
     # ------------------------------------------------------------------
-    def _due_for_logging(self, motor_id: str, status: str, now: datetime) -> bool:
+    def _due_for_logging(
+        self, motor_id: str, cadence_status: str, now: datetime
+    ) -> bool:
         """Healthy: 30-min cadence. Anomaly: 1-min cadence. Inrush windows
-        are logged at healthy cadence so commissioning history exists."""
+        are logged at healthy cadence so commissioning history exists.
+
+        ``cadence_status`` is the ESCALATED signal (SIGMO_RULES.md
+        Section 10: 1-minute logging whenever an early Stage 2+ anomaly
+        is detected — by the novelty gate OR the v6c classifier
+        verdict). The persisted ``status`` column keeps the honest gate
+        status; only the cadence decision uses the escalated value.
+        """
         interval = (
             DB.anomaly_log_interval_s
-            if status == "ANOMALY"
+            if cadence_status == "ANOMALY"
             else DB.healthy_log_interval_s
         )
         last = self._last_logged.get(motor_id)
@@ -87,6 +96,7 @@ class SigmoRepository:
         predicted_class: str | None = None,
         model_confidence: float | None = None,
         model_version: str | None = None,
+        cadence_status: str | None = None,
     ) -> bool:
         """Persist one feature row if the adaptive cadence allows it.
 
@@ -95,12 +105,20 @@ class SigmoRepository:
         are flushed later with their original capture timestamps and must
         not be re-filtered by the live cadence gate.
 
+        `cadence_status` (Section 10): the escalated signal driving the
+        logging interval — pass "ANOMALY" when the classifier verdict is
+        a non-HEALTHY class even if the novelty gate is still clear.
+        Defaults to the honest gate `status`.
+
         Returns True if a row was written, False if skipped by cadence.
         """
         if status not in ("HEALTHY", "ANOMALY", "INRUSH_SUPPRESSED"):
             raise ValueError(f"Invalid telemetry status: {status!r}")
         now = recorded_at or datetime.now(timezone.utc)
-        if not bypass_cadence and not self._due_for_logging(motor_id, status, now):
+        effective = cadence_status or status
+        if not bypass_cadence and not self._due_for_logging(
+            motor_id, effective, now
+        ):
             return False
 
         pa, pb, pc = features.phase_a, features.phase_b, features.phase_c
