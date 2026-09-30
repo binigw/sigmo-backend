@@ -183,3 +183,33 @@ BEGIN
     RETURN removed;
 END;
 $$ LANGUAGE plpgsql;
+
+-- ---------------------------------------------------------------------------
+-- ROW-LEVEL SECURITY (Supabase Security Advisor; applied 2026-09-30)
+--
+-- Architecture: the FastAPI backend connects as `postgres` (BYPASSRLS via
+-- DATABASE_URL), so ALL backend reads/writes are unaffected. The dashboard
+-- browser uses supabase-js ONLY for auth, the personnel directory and its
+-- own user_roles row (policies below / created at project setup). Every
+-- telemetry/motor/fault/alert table is therefore DENY-BY-DEFAULT for
+-- anon/authenticated: no policies + default grants revoked. Data flows
+-- exclusively through the Sigmo V2 API (X-API-Key scopes).
+-- Idempotent: safe on every boot.
+-- ---------------------------------------------------------------------------
+ALTER TABLE public.motors               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.motor_baselines      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.telemetry_features   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.fault_logs           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.population_baseline  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.plant_config         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.alert_dismissals     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.personnel            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.user_roles           ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.motors              FROM anon, authenticated;
+REVOKE ALL ON public.motor_baselines     FROM anon, authenticated;
+REVOKE ALL ON public.telemetry_features  FROM anon, authenticated;
+REVOKE ALL ON public.fault_logs          FROM anon, authenticated;
+REVOKE ALL ON public.population_baseline FROM anon, authenticated;
+REVOKE ALL ON public.plant_config        FROM anon, authenticated;
+REVOKE ALL ON public.alert_dismissals    FROM anon, authenticated;
