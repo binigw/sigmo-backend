@@ -395,6 +395,31 @@ end-to-end from Supabase rows.
 
 ---
 
+---
+
+## 15. ESP32 FIRMWARE & WOKWI SIMULATION PROTOCOL (MTR-PILOT-01)
+
+- **HARDWARE MAPPING & SCOPE:**
+  - Target Motor: `MTR-PILOT-01` (75 kW, ~140 A FLA).
+  - Pure MCSA exclusively (`Ia`, `Ib`, `Ic` current waveforms). Zero extra sensors (§4.1).
+  - Pin Allocation (ADC1 Only): `GPIO 32` (Phase A / Ia), `GPIO 33` (Phase B / Ib), `GPIO 34` (Phase C / Ic).
+  - Wokwi Simulation Setup: Map physical SCT-019 CT sensors to 3× Potentiometers for input waveform generation.
+
+- **SAMPLING ENGINE & FREERTOS DUAL-CORE:**
+  - Sampling Rate: Exactly 10,240 Hz via I2S DMA.
+  - Frame Size: Exactly 2048 raw samples per frame per phase.
+  - Core 1 Task: Continuous high-speed ADC1 sampling into ping-pong DMA buffers.
+  - Core 0 Task: Wi-Fi stack, network reconnections, and non-blocking HTTP POST payload transmission.
+
+- **CLOUD INTEGRATION & SIMULATION NETWORK:**
+  - Wi-Fi SSID: `Wokwi-GUEST` (Virtual open network for Wokwi testing).
+  - Direct Live API Target: `POST https://sigmo-backend-w4cx.onrender.com/api/v2/telemetry`.
+  - JSON Payload: Full raw array telemetry matching Sigmo V2 API specifications.
+
+- **ZERO FAKE CODE DIRECTIVE (§3 COMPLIANCE):**
+  - Provide 100% complete, compilable, and production-ready C++ firmware.
+  - Zero mock data generators, zero `TODO` placeholders, zero empty functions. Code must compile natively both in Wokwi and on physical ESP32 DevKit hardware.
+
 ====================================================================
-END OF RULEBOOK — SIGMO V2 | Version 1.1 | Original: 2026-09-21 | Amendment §14 (Deterministic RUL via Slope Extrapolation): 2026-09-24
+END OF RULEBOOK — SIGMO V2 | Version 1.1 | Original: 2026-09-21 | Amendment §14 (Deterministic RUL via Slope Extrapolation): 2026-09-24 | Amendment §15 (ESP32 Firmware & Wokwi Simulation Protocol): 2026-10-06
 ====================================================================
